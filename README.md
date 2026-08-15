@@ -16,13 +16,6 @@ land the click on the X. Every miss and near-miss along the way gets counted
 against you. Your best time is saved locally in your browser, so you can
 watch your record mock you on the next attempt.
 
-## The trick
-
-The card's top speed is capped. It cannot outrun you forever in open space,
-and it definitely cannot outrun you once it's pinned in a corner. Herd it,
-don't chase it — that's the intended strategy, not an exploit. The game is
-extremely hard. It is not impossible.
-
 ## Fair play
 
 The close button only responds to real, trusted pointer clicks. Keyboard

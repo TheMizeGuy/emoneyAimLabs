@@ -2,3 +2,5 @@
 .remember/
 .anti-slop/
 .DS_Store
+.playwright-mcp/
+/*.png
