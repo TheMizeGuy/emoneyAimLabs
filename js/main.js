@@ -42,6 +42,7 @@
   var stage       = document.getElementById('stage');
 
   var chase = null, flappy = null;
+  var running = null;           // re-entrancy guard: engines must never stack
 
   /* ---------------- shared audio ---------------- */
 
@@ -87,6 +88,7 @@
       onDecodeFailed();
       return;
     }
+    // Chrome honours both forms, so a bad buffer used to report twice
     if (p && p.then) p.then(onDecoded, onDecodeFailed);
   }
 
@@ -97,8 +99,13 @@
     pushAudio();
   }
 
+  // Chrome honours both the callback and the promise form, so this used to
+  // report the same bad buffer twice.
+  var decodeReported = false;
   function onDecodeFailed() {
     decoding = false;
+    if (decodeReported) return;
+    decodeReported = true;
     ERR('[AIMLAB] loop decode failed');
   }
 
@@ -123,22 +130,52 @@
 
   /* ---------------- modes ---------------- */
 
+  /* The one thing both modes need was the one call with no guard on it: a 404,
+     a CSP block or a rewritten chase.js used to throw *after* the start screen
+     was already hidden, leaving a black rectangle with no menu and no recovery
+     short of a reload. In simulation it detonated inside flappy's rAF stack the
+     instant the player finished earning their tenth point. Now a failure puts
+     the menu back and says so. */
+  function startChase(cfg) {
+    if (!window.AimlabChase || !window.AimlabChase.start) {
+      ERR('[AIMLAB] chase engine unavailable');
+      failToMenu();
+      return null;
+    }
+    try {
+      return window.AimlabChase.start(stage, cfg);
+    } catch (e) {
+      ERR('[AIMLAB] chase failed to start: ' + (e && e.message));
+      failToMenu();
+      return null;
+    }
+  }
+
+  function failToMenu() {
+    running = null;
+    startScreen.classList.remove('hide');
+  }
+
   function startPractice() {
+    if (running) return;               // one engine at a time, whatever clicks arrive
+    running = 'practice';
     startScreen.classList.add('hide');
     LOG('[AIMLAB] MODE mode=practice');
-    chase = window.AimlabChase.start(stage, {
+    chase = startChase({
       imageSrc: PRACTICE.imageSrc,
       imageW: PRACTICE.imageW,
       imageH: PRACTICE.imageH,
       bestKey: PRACTICE.bestKey,
       recordBest: !isSeam,
-      // null hands audio ownership to the engine, which builds its own context
-      // inside the first miss click for the error chord. There is no loop here.
+      // V2.8: practice is silent. No loop, no error chord, no AudioContext -- the
+      // engine never builds one, so there is nothing here to autoplay-gate.
       audio: null
     });
   }
 
   function startSimulation(fromGesture) {
+    if (running) return;
+    running = 'simulation';
     startScreen.classList.add('hide');
     LOG('[AIMLAB] MODE mode=simulation');
     fetchLoop();
@@ -153,7 +190,9 @@
         // info argument is new in V2.7 and purely additive -- it carries flappy's
         // sus count and any state verdict across so the chase can show them.
         onComplete: function (info) {
-          if (flappy && flappy.stop) flappy.stop();
+          // a throw in teardown must not cost the player the run they just earned
+          try { if (flappy && flappy.stop) flappy.stop(); }
+          catch (e) { ERR('[AIMLAB] flappy stop threw: ' + (e && e.message)); }
           flappy = null;
           startSimChase(info);
         }
@@ -166,7 +205,7 @@
   }
 
   function startSimChase(info) {
-    chase = window.AimlabChase.start(stage, {
+    chase = startChase({
       imageSrc: SIMULATION.imageSrc,
       imageW: SIMULATION.imageW,
       imageH: SIMULATION.imageH,

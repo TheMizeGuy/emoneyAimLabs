@@ -74,13 +74,45 @@
   var CAF       = W.cancelAnimationFrame.bind(W);
   var DELAY     = W.setTimeout.bind(W);
   var UNDELAY   = W.clearTimeout.bind(W);
+  var EVERY     = W.setInterval.bind(W);
+  var UNEVERY   = W.clearInterval.bind(W);
   var LOG = (W.console && W.console.log) ? W.console.log.bind(W.console) : function () {};
   var OBSERVER = W.MutationObserver || W.WebKitMutationObserver || null;
+
+  /* Layer D reads every one of its measurements through this. Capturing the
+     method matters more than capturing the clocks: a patched
+     getBoundingClientRect feeds the geometry detector a lie, and the detector
+     then never fires the restore that would have undone the attack. */
+  var RECT = (W.Element && W.Element.prototype && W.Element.prototype.getBoundingClientRect)
+    ? W.Element.prototype.getBoundingClientRect
+    : null;
+
+  /* A third clock, deliberately reached through a different function object
+     than WALL. Date.now and Date.prototype.getTime are separate properties, so
+     scaling both of the first two clocks by one factor -- which reads perfectly
+     clean to a difference-based check -- still leaves this one telling the
+     truth. */
+  var DATE    = W.Date;
+  var GETTIME = (W.Date && W.Date.prototype && W.Date.prototype.getTime)
+    ? W.Date.prototype.getTime
+    : null;
   // V2.7 layer G leans on these two, so they are captured with the rest
   var SUBTLE = (W.crypto && W.crypto.subtle && W.crypto.subtle.digest)
     ? W.crypto.subtle.digest.bind(W.crypto.subtle)
     : null;
   var TENC = W.TextEncoder || null;
+
+  // Every geometry read in the engine goes through here, never through the
+  // element's own (patchable) method.
+  function boxOf(node) {
+    // the fallback is only reached where Element.prototype is unavailable
+    return RECT ? RECT.call(node) : node.getBoundingClientRect();
+  }
+
+  function wall2() {
+    if (!GETTIME) return Date.now();
+    try { return GETTIME.call(new DATE()); } catch (e) { return Date.now(); }
+  }
 
   var DEFAULT_IMAGE    = './assets/emoney.png';
   var DEFAULT_BEST_KEY = 'emoney-aimlabs-best';
@@ -150,6 +182,18 @@
     '<button class="again" data-el="shameOk" type="button">OK</button>',
     '</div>',
     '</div>',
+    '</div>',
+    '<div class="pausebox hide" data-el="pauseBox">',
+    '<div class="ovcard">',
+    '<div class="ovbar"><span class="ovbartitle">eMoney.exe</span></div>',
+    '<div class="ovbody">',
+    '<div class="errrow">',
+    '<span class="erricon" aria-hidden="true"></span>',
+    '<p class="errtext">This window is too small to run away in.<br>Make the browser bigger to carry on.</p>',
+    '</div>',
+    '<p class="errsub">Paused. The clock is not running.</p>',
+    '</div>',
+    '</div>',
     '</div>'
   ].join('');
 
@@ -184,6 +228,7 @@
     var NEAR_RADIUS        = 48;     // px from the close button's center
     var NEAR_DEBOUNCE      = 250;    // ms
     var EDGE_PAD           = 10;     // keeps a margin between the window and the screen edge
+    var PLAY_MARGIN        = 200;    // room the card needs beyond its own size, or the run pauses
     var LATCH_MAX_MS       = 600;    // failsafe so a lost pointerup cannot freeze the card forever
     var BEST_KEY           = (typeof opts.bestKey === 'string' && opts.bestKey) ? opts.bestKey : DEFAULT_BEST_KEY;
     var RECORD_BEST        = (opts.recordBest !== false);
@@ -201,6 +246,7 @@
 
     /* V2.6 anti-cheat */
     var CLOCK_TOLERANCE_MS = 750;  // total allowed drift between the two clocks
+    var CLOCK_AUDIO_TOL    = 1500; // the audio-thread cross-check, deliberately loose
     var CLOCK_STEP_MS      = 400;  // a single-frame jump between them reads as a splice
     var TAMPER_DEBOUNCE_MS = 800;  // one taunt per burst of meddling, not one per mutation
     var SHAME_MUL          = 1.15; // shame mode: the card gets 15 percent quicker
@@ -218,14 +264,18 @@
     var LAG_DEBT_MAX  = 2000;  // ms of dropped simulation before it counts as suspicious
     var LAG_HEAL_MS   = 40;    // a frame at 25 fps or better is a healthy frame...
     var LAG_HEAL_STEP = 8;     // ...and pays down 8 ms of debt, so hitches never add up
+    var LOOP_DEAD_MS  = 1000;  // main loop silent this long, while visible, = restart it
 
     /* V2.7 layer B -- cursor presence gate on the winning press. */
     var PRESENCE_MS   = 350;   // a trusted move must be this recent...
     var PRESENCE_PX   = 150;   // ...and this close to the press point
     var PRESENCE_SNAP = 2;     // or the press must land on the pointer's own last position
+    var PRESENCE_SWALLOW_MS = 400;  // how long a blocked press suppresses its own click
 
     /* V2.7 layer D -- geometry attestation. */
     var ATTEST_FRAMES = 30;    // roughly twice a second
+    var GEOM_SUS_DEBOUNCE_MS = 2000;  // one geometry complaint per this window...
+    var GEOM_SUS_MAX         = 5;     // ...and this many in a whole run
     var GEOM_TOL      = 2;     // px, box sizes and the button's offset in the frame
     var POS_TOL       = 1;     // px, on-screen transform against the engine's own position
     var EXP_BTN_W     = 28;    // the caption button, straight out of the stylesheet
@@ -243,17 +293,19 @@
       'You clicked the face. Bold.',
       'Still open.'
     ];
-    var TAUNT_FAKE   = 'Real clicks only. Keyboard does not count.';
-    var TAUNT_TAMPER = 'Nice try. The numbers come from somewhere you cannot reach.';
-    var TAUNT_TOOLS  = 'The devtools are not the hard part. The button is.';
-    var TAUNT_STORE  = 'Record corrupted. Someone has been editing their trophies.';
-    var SHAME_TEXT   = 'Caught you looking under the hood. He is 15 percent faster now. Enjoy.';
+    var TAUNT_FAKE     = 'Real clicks only. Keyboard does not count.';
+    var TAUNT_TAMPER   = 'Nice try. The numbers come from somewhere you cannot reach.';
+    var TAUNT_TOOLS    = 'The devtools are not the hard part. The button is.';
+    var TAUNT_STORE    = 'Record corrupted. Someone has been editing their trophies.';
+    var SHAME_TEXT     = 'Caught you looking under the hood. He is 15 percent faster now. Enjoy.';
 
     /* V2.7 taunts. Each one is reachable only by doing something a mouse cannot. */
     var TAUNT_LAG      = 'Slideshow mode does not slow him down. It only slows you down.';
     var TAUNT_PRESENCE = 'Clicks arrive where the pointer is. Yours did not.';
     var TAUNT_GEOM     = 'The button is 28 pixels wide. It was 28 pixels wide before you edited it too.';
     var TAUNT_BUILD    = 'This build has been modified. He noticed.';
+    var TAUNT_TOUCH    = 'Fingers do not close this one. A mouse does.';
+    var TAUNT_TELEPORT = 'That cursor did not travel. Move the mouse like a person.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
@@ -309,6 +361,19 @@
     var rowOvSus  = el('ovSusRow');
     var elOvSus   = el('ovSus');
     var cheatText = el('cheatText');
+    var pauseBox  = el('pauseBox');
+    /* These five were the only nodes in the file resolved by el() at use time
+       rather than cached here. Both consumers null-guard, so dropping a
+       data-el attribute in the elements panel made every write a silent no-op
+       and let a forged time survive into the win dialog next to a valid
+       signature. Cached like everything else, a missing node is now impossible
+       rather than merely unlikely, and checkStructure() puts it back. */
+    var elOvTime  = el('ovTime');
+    var elOvMiss  = el('ovMiss');
+    var elOvNear  = el('ovNear');
+    var elOvBest  = el('ovBest');
+    var elOvNote  = el('ovNote');
+    var ovStats   = elOvMiss ? elOvMiss.parentNode.parentNode : null;
 
     // The window is built around the image at its native size, so it can be
     // sized up front and the layout never shifts when the image lands.
@@ -392,14 +457,43 @@
     var lastT = 0, rafId = 0, tauntTimer = 0, winTimer = 0;
     var stopped = false;
 
-    // dual-clock integrity
+    // dual-clock integrity, plus the two independent references that catch a
+    // coordinated edit of the first two (B4)
     var startWall = 0, clkDrift = 0, clkLast = null, clkStep = false;
     var clkSum = 0, clkPair = -1, clkStill = 0;
+    var startWall2 = 0;
+    var audioT0 = -1, audioWall0 = 0, audioBad = 0;
     var tamperAt = -1e9, shame = 1;
     var mo = null, mo2 = null, geomDirty = false;
 
+    // layer D backoff: a page zoom or a user stylesheet is a mismatch restoreChrome
+    // cannot undo, and re-running the repair every frame was a 123/s console flood
+    var geomFailStreak = 0, geomSusAt = -1e9, geomSusCount = 0, restoreQuietUntil = 0;
+
+    // ruling 3: too small a viewport pauses the run behind a dialog
+    var paused = false, pauseAt = 0, pauseWall = 0, pauseWall2 = 0;
+
+    // B5: the rAF id namespace is page-global, so the loop needs a heartbeat
+    var watchdog = 0;
+
+    // B6/B7: a press has to sit inside a run that actually rendered frames
+    var framesRun = 0, firstMoveFrame = -1;
+
+    // V2.7 item 1: what kind of pointer is behind the click being judged
+    var lastPointerType = '', sawTouch = false;
+    var HAS_POINTER_EVENTS = !!W.PointerEvent;
+
+    // F3/F4 physics: a spoofed document.hidden, and stall-loop counting
+    var hiddenFrames = 0, pauseFrames = 0, stallFlagged = false;
+
+    // F5 quality: timers that must not outlive stop()
+    var storeTimer = 0, voiceTimers = [];
+
+    // taunt placement, recomputed from cached numbers so render() reads no layout
+    var tauntOn = false, tauntW = 0;
+
     // V2.7 layer A: sub-step accumulator and the lag debt it sheds
-    var accumMs = 0, simT = 0, lagDebtMs = 0, lagFlagged = false, pageHidden = false;
+    var accumMs = 0, simT = 0, lagDebtMs = 0, lagFlagged = false;
 
     // V2.7 layer B: the last trusted mouse position, and the press that failed the gate
     var moveT = -1e9, moveX = 0, moveY = 0, presenceBlockAt = -1e9;
@@ -416,9 +510,7 @@
     // When the caller passes an audio object it owns the AudioContext, so the
     // chase never constructs a second one; practice passes null and owns nothing,
     // so the chase makes its own context lazily inside a miss click.
-    var callerOwnsAudio = !!opts.audio;
     var audio = opts.audio || null;
-    var ownCtx = null;
     var audioSource = null, audioStarted = false, audioArmed = false;
     var errVoices = [];
 
@@ -567,11 +659,17 @@
     }
 
     function showTaunt(text) {
-      if (won) return;
+      if (won || stopped) return;          // a post-teardown timer must not re-arm
       taunt.textContent = text;
       taunt.classList.add('on');
+      tauntOn = true;
+      tauntW = taunt.offsetWidth;          // one layout read per taunt, not per frame
+      placeTaunt();
       UNDELAY(tauntTimer);
-      tauntTimer = DELAY(function () { taunt.classList.remove('on'); }, 1300);
+      tauntTimer = DELAY(function () {
+        taunt.classList.remove('on');
+        tauntOn = false;
+      }, 1300);
     }
 
     function startTimer() {
@@ -579,6 +677,7 @@
       started = true;
       shStartT.set(NOW());
       startWall = WALL();
+      startWall2 = wall2();
       simT = NOW();
       LOG('[AIMLAB] START');
     }
@@ -639,6 +738,31 @@
         clkPair = pair;
       }
       clkSum = (Math.imul(clkSum, 31) + pair) >>> 0;
+
+      /* B4. Everything above measures the *difference* between two clocks, so
+         scaling both by one factor reads perfectly clean. These two references
+         are reached through function objects the first pair does not share. */
+      var w2 = wall2() - startWall2;
+      if (Math.abs(w2 - w) > CLOCK_TOLERANCE_MS) clkStep = true;
+
+      /* The audio clock advances on the audio thread and is not reachable from
+         JS at all. Only simulation has a context, and only while it is actually
+         running -- a suspended or freshly resumed context re-baselines instead
+         of accusing. Three consecutive violations at a generous threshold keeps
+         it clear of ordinary audio-clock drift. */
+      var actx = audio && audio.ctx;
+      if (actx && actx.state === 'running') {
+        if (audioT0 < 0) { audioT0 = actx.currentTime; audioWall0 = w; }
+        else {
+          var ad = (actx.currentTime - audioT0) * 1000 - (w - audioWall0);
+          if (Math.abs(ad) > CLOCK_AUDIO_TOL) {
+            if (++audioBad >= 3) clkStep = true;
+          } else if (audioBad > 0) audioBad--;
+        }
+      } else {
+        audioT0 = -1;
+        audioBad = 0;
+      }
     }
 
     function clockIsSuspect() {
@@ -656,10 +780,10 @@
       if (bestMs !== null) fixed += reassert(elBest, fmt(bestMs));
       if (won) {
         fixed += reassert(elTime, fmt(finalMs));
-        fixed += reassert(el('ovTime'), fmt(finalMs));
-        fixed += reassert(el('ovMiss'), m);
-        fixed += reassert(el('ovNear'), nm);
-        fixed += reassert(el('ovBest'), bestMs === null ? '--' : fmt(bestMs));
+        fixed += reassert(elOvTime, fmt(finalMs));
+        fixed += reassert(elOvMiss, m);
+        fixed += reassert(elOvNear, nm);
+        fixed += reassert(elOvBest, bestMs === null ? '--' : fmt(bestMs));
         if (winSig) fixed += reassert(elOvSig, winSig.slice(0, 8));
         if (susN > 0) fixed += reassert(elOvSus, susN);
       }
@@ -707,12 +831,27 @@
     // against those. An unfamiliar renderer is not a cheat.
     function calibrate() {
       if (calibrated || won || stopped) return;
-      var cr = card.getBoundingClientRect();
-      var br = btn.getBoundingClientRect();
+      var cr = boxOf(card);
+      var br = boxOf(btn);
       if (!(cr.width > 0 && cr.height > 0 && br.width > 0 && br.height > 0)) return;
       calibrated = true;
       if (Math.abs(cr.width - cardW) > GEOM_TOL || Math.abs(cr.height - cardH) > GEOM_TOL ||
           Math.abs(br.width - btnW) > GEOM_TOL || Math.abs(br.height - btnH) > GEOM_TOL) {
+        /* The engine boots inside the mode-button click, so a stylesheet
+           injected while the start screen was up is "pre-boot" and used to be
+           adopted as ground truth -- handing layer D the attacker's geometry to
+           attest against. An unfamiliar renderer disagrees by a pixel or two;
+           it does not disagree by 7x. Outside a sane band, keep the stylesheet
+           arithmetic and let attest() restore against that instead. */
+        if (Math.abs(cr.width - cardW) > cardW * 0.25 ||
+            Math.abs(cr.height - cardH) > cardH * 0.25 ||
+            Math.abs(br.width - btnW) > btnW * 0.25 ||
+            Math.abs(br.height - btnH) > btnH * 0.25) {
+          sus('geometry-boot');
+          showTaunt(TAUNT_GEOM);
+          restoreChrome();
+          return;
+        }
         cardW = cr.width;
         cardH = cr.height;
         btnW = br.width;
@@ -726,12 +865,23 @@
     }
 
     function attest() {
-      if (won || stopped || !calibrated) return;
-      var br = btn.getBoundingClientRect();
-      var cr = card.getBoundingClientRect();
+      if (won || stopped || !calibrated || paused) return;
+      // our own restoreChrome() writes are observed by mo2; do not re-judge them
+      if (NOW() < restoreQuietUntil) return;
+      var br = boxOf(btn);
+      var cr = boxOf(card);
       var bad = '';
 
-      if (!(br.width > 0 && br.height > 0) || !(cr.width > 0 && cr.height > 0)) {
+      /* B2. getBoundingClientRect returns the element's own border box and says
+         nothing about descendants that overflow it, while the win handler used
+         to accept any descendant as the button. A 10000px child parked off
+         screen therefore made the whole viewport clickable while the button
+         still measured a pristine 28x26. The glyph is ::before/::after, so the
+         honest child count is exactly zero. */
+      if (btn.children.length !== 0) {
+        while (btn.firstElementChild) btn.removeChild(btn.firstElementChild);
+        bad = 'button-children';
+      } else if (!(br.width > 0 && br.height > 0) || !(cr.width > 0 && cr.height > 0)) {
         bad = 'hidden';
       } else if (Math.abs(br.width - btnW) > GEOM_TOL || Math.abs(br.height - btnH) > GEOM_TOL) {
         bad = 'button';
@@ -749,8 +899,24 @@
         }
       }
 
-      if (!bad) return;
-      restoreChrome();
+      if (!bad) { geomFailStreak = 0; return; }
+
+      /* Not every mismatch is repairable. A page-level `zoom` or a
+         `transform: scale()` from a user stylesheet or an accessibility
+         extension touches none of the nodes restoreChrome() stamps, so the
+         repair fails, mo2 sees the write, geomDirty re-arms, and the whole
+         thing used to run again on the very next frame -- 123 detections a
+         second, a console flood and a layout-thrash loop, at a player who was
+         merely using page zoom. Repair a few times, complain at most once every
+         couple of seconds and at most a handful of times per run, then leave it
+         alone. */
+      geomFailStreak++;
+      if (geomFailStreak <= 3) restoreChrome();
+
+      var t = NOW();
+      if (t - geomSusAt < GEOM_SUS_DEBOUNCE_MS || geomSusCount >= GEOM_SUS_MAX) return;
+      geomSusAt = t;
+      geomSusCount++;
       sus('geometry-' + bad);
       showTaunt(TAUNT_GEOM);
     }
@@ -786,6 +952,7 @@
                   'transform', 'none', 'display', 'block', 'visibility', 'visible',
                   'opacity', '1', 'pointer-events', 'auto']);
       render();
+      restoreQuietUntil = NOW() + 50;   // mo2 will see these writes; they are ours
     }
 
     function ensure(parent, child, before) {
@@ -810,6 +977,11 @@
       n += ensure(barEl, barTitle, btn);
       n += ensure(hudEl, rowSus, null);
       n += ensure(rowSus, elSus, null);
+      n += ensure(ovWin, elOvTime, elOvNote);
+      n += ensure(ovWin, elOvNote, ovStats);
+      n += ensure(ovStats ? elOvMiss.parentNode : null, elOvMiss, null);
+      n += ensure(ovStats ? elOvNear.parentNode : null, elOvNear, null);
+      n += ensure(ovStats ? elOvBest.parentNode : null, elOvBest, null);
       if (n === 0) return;
       restoreChrome();
       sus('structure');
@@ -838,14 +1010,12 @@
 
     // Simulation hands its context down; practice builds one on the first miss,
     // which is itself a click and therefore a qualifying gesture.
+    /* V2.8: the caller owns every AudioContext there is. Simulation hands one
+       down; practice hands down nothing and is therefore silent -- no error
+       chord, no context, no autoplay surface at all. The engine no longer
+       builds its own under any circumstances. */
     function getCtx() {
-      if (audio && audio.ctx) return audio.ctx;
-      if (callerOwnsAudio) return null;
-      if (ownCtx) return ownCtx;
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return null;
-      try { ownCtx = new AC(); } catch (e) { ownCtx = null; }
-      return ownCtx;
+      return (audio && audio.ctx) ? audio.ctx : null;
     }
 
     // An AudioBufferSourceNode looping the whole buffer is sample-accurate, and
@@ -921,11 +1091,14 @@
       }
 
       errVoices.push(master);
-      DELAY(function () {
+      var reap = DELAY(function () {
         var at = errVoices.indexOf(master);
         if (at >= 0) errVoices.splice(at, 1);
+        var ti = voiceTimers.indexOf(reap);
+        if (ti >= 0) voiceTimers.splice(ti, 1);
         try { master.disconnect(); } catch (e) { /* already detached */ }
       }, ERROR_MS + 80);
+      voiceTimers.push(reap);
     }
 
     function stopAudio() {
@@ -947,7 +1120,6 @@
     function setAudio(a) {
       if (stopped || won) return;
       audio = a || null;
-      if (audio) callerOwnsAudio = true;
       tryStartAudio();
     }
 
@@ -964,20 +1136,88 @@
       calibrate();
       clampIntoView();
       render();
+      checkPlayable();
     }
 
     function clampIntoView() {
       var hw = cardW / 2, hh = cardH / 2;
       var minX = hw + EDGE_PAD, maxX = vw - hw - EDGE_PAD;
       var minY = hh + EDGE_PAD, maxY = vh - hh - EDGE_PAD;
-      // If the viewport is smaller than the card there is no legal band; park it centered.
+      // If the viewport is smaller than the card there is no legal band; park it
+      // centered. Unreachable during play now that playable() gates the run, but
+      // kept as the safety net it always was.
       x = (maxX > minX) ? Math.min(maxX, Math.max(minX, x)) : vw / 2;
       y = (maxY > minY) ? Math.min(maxY, Math.max(minY, y)) : vh / 2;
     }
 
+    /* Ruling 3. Below this the card has nowhere to flee: the legal band collapses,
+       the engine parks it dead centre and the chase stops being a chase. That is
+       reachable without any tooling -- a half-height window, or Ctrl+= to 500%,
+       which divides the CSS viewport and froze the card outright. Rather than
+       let a pinned playfield produce a "record", the run pauses behind a Win95
+       dialog with the clock stopped, and resumes untouched when the window comes
+       back. No accusation: resizing a browser is not cheating. */
+    function playable() {
+      return vw >= cardW + 2 * EDGE_PAD + PLAY_MARGIN &&
+             vh >= cardH + 2 * EDGE_PAD + PLAY_MARGIN;
+    }
+
+    function enterPause() {
+      if (paused || won || stopped) return;
+      paused = true;
+      pauseAt = NOW();
+      pauseWall = WALL();
+      pauseWall2 = wall2();
+      pauseBox.classList.remove('hide');
+    }
+
+    function leavePause() {
+      if (!paused) return;
+      paused = false;
+      pauseBox.classList.add('hide');
+      // Every clock the engine keeps skips the paused interval, so a pause can
+      // neither pad a time nor read as drift when the run continues.
+      var d = NOW() - pauseAt;
+      if (started && d > 0) {
+        shStartT.set(shStartT.get() + d);
+        startWall += WALL() - pauseWall;
+        startWall2 += wall2() - pauseWall2;
+      }
+      clkLast = null; clkPair = -1; clkStill = 0;
+      audioT0 = -1; audioBad = 0;
+      accumMs = 0;
+      simT = NOW();
+      lastT = NOW();
+    }
+
+    function checkPlayable() {
+      if (won || stopped) return;
+      if (playable()) leavePause(); else enterPause();
+    }
+
     function render() {
+      // Integer pixels, or the two-step bevel subpixel-blurs into a soft
+      // approximation of Win95 chrome. x/y stay float in the physics; only the
+      // paint is rounded, which is at most 0.5px per axis and well inside POS_TOL.
       wrap.style.transform =
-        'translate3d(' + (x - cardW / 2).toFixed(2) + 'px,' + (y - cardH / 2).toFixed(2) + 'px,0)';
+        'translate3d(' + Math.round(x - cardW / 2) + 'px,' + Math.round(y - cardH / 2) + 'px,0)';
+      if (tauntOn) placeTaunt();
+    }
+
+    /* The taunt is the entire response mechanism of the anti-cheat layer, and it
+       used to hang off a 136px window as a 400px nowrap bubble that clipped
+       against `overflow: hidden` -- reliably invisible in exactly the corners
+       where the endgame is played. It now flips above the card near the bottom
+       edge and slides horizontally to stay on screen. Width is cached at show
+       time so this reads no layout per frame. */
+    function placeTaunt() {
+      var half = tauntW / 2;
+      var shift = 0;
+      if (x - half < 8) shift = 8 - (x - half);
+      else if (x + half > vw - 8) shift = (vw - 8) - (x + half);
+      taunt.style.marginLeft = Math.round(shift) + 'px';
+      if (y + cardH / 2 + 52 > vh) taunt.classList.add('up');
+      else taunt.classList.remove('up');
     }
 
     /* ---------------- pointer ---------------- */
@@ -998,42 +1238,59 @@
       hasPointer = true;
     }
 
-    function dropPointer() {
+    /* hasPointer is the master switch for the whole flee block, and a dispatched
+       `blur` or `pointerleave` used to throw it -- one line in the console
+       disarmed the physics permanently for zero sus. Only the browser's own
+       events may disarm it now, and a blur is only believed when the document
+       really did lose focus. */
+    function dropPointer(e) {
+      if (e && e.isTrusted === false) return;
       hasPointer = false;
       cvx = 0; cvy = 0;
       velT = 0;
       nearInside = false;
     }
 
+    function onBlur(e) {
+      if (e && e.isTrusted === false) return;
+      if (document.hasFocus && document.hasFocus()) return;
+      dropPointer();
+    }
+
     on(window, 'pointermove', function (e) {
-      startTimer();
       var t = NOW();
       setPointer(e.clientX, e.clientY, t);
       // V2.7 layer B: only a trusted move is evidence that a pointer is really
       // there. Dispatched moves still push the physics around, as they always
       // did, but they cannot vouch for a press.
-      if (e.isTrusted) { moveT = t; moveX = e.clientX; moveY = e.clientY; }
+      if (e.isTrusted) {
+        moveT = t; moveX = e.clientX; moveY = e.clientY;
+        if (firstMoveFrame < 0) firstMoveFrame = framesRun;
+      }
     }, { passive: true });
 
     on(window, 'pointerdown', function (e) {
-      startTimer();
       setPointer(e.clientX, e.clientY, NOW());
+      if (!e.isTrusted) return;
+      // which device is behind the click that is about to be judged (V2.7 item 1)
+      lastPointerType = e.pointerType || '';
+      if (e.pointerType === 'touch' || e.pointerType === 'pen') sawTouch = true;
+      if (firstMoveFrame < 0) firstMoveFrame = framesRun;
     }, { passive: true, capture: true });
 
     on(document, 'pointerleave', dropPointer);
-    on(window, 'blur', dropPointer);
+    on(window, 'blur', onBlur);
 
     on(window, 'touchstart', function (e) {
       var t0 = e.touches[0];
       if (!t0) return;
-      startTimer();
+      if (e.isTrusted) sawTouch = true;
       setPointer(t0.clientX, t0.clientY, NOW());
     }, { passive: true });
 
     on(window, 'touchmove', function (e) {
       var t0 = e.touches[0];
       if (!t0) return;
-      startTimer();
       setPointer(t0.clientX, t0.clientY, NOW());
       if (e.cancelable) e.preventDefault();
     }, { passive: false });
@@ -1049,15 +1306,14 @@
     // ancestor. A card moving at 2000 px/s would slide out from under a genuine press, so a
     // trusted press that lands on the X latches the card still until the pointer is released.
     on(btn, 'pointerdown', function (e) {
-      if (won || !e.isTrusted) return;
-      startTimer();
+      if (won || paused || !e.isTrusted) return;
 
       // V2.7 layer B. A mouse cannot press where it is not: the browser streams a
       // pointermove to every position the cursor passes through, so the last
       // trusted move is always at the press point. Touch and pen are exempt -- a
       // tap legitimately arrives with nothing in front of it.
       if (e.pointerType === 'mouse' && !presenceOK(e.clientX, e.clientY)) {
-        presenceBlockAt = NOW();
+        if (e.button === 0) presenceBlockAt = NOW();   // only a primary press makes a click
         addMiss('presence');
         sus('presence');
         showTaunt(TAUNT_PRESENCE);
@@ -1073,6 +1329,32 @@
     // lands on the pointer's own last known position -- which is what a player
     // who parks the cursor and waits for the window to come to them produces,
     // and what an injected press at an arbitrary coordinate never does.
+    /* V2.7 item 1. `pointerType` on the press behind this click is the primary
+       signal; Blink's sourceCapabilities.firesTouchEvents is a secondary one for
+       clicks synthesised out of a tap. Pen counts as touch. A click with no
+       pointer event behind it at all, in a browser that has pointer events, is
+       not a mouse either. */
+    function inputIsMouse(e) {
+      if (lastPointerType && lastPointerType !== 'mouse') return false;
+      var sc = e.sourceCapabilities;
+      if (sc && sc.firesTouchEvents === true) return false;
+      if (HAS_POINTER_EVENTS && !lastPointerType) return false;
+      return true;
+    }
+
+    // At least two rendered frames between the first pointer event of the run and
+    // the winning press. Every human clears this by thousands; a move-down-up
+    // burst dispatched in one task clears it by none.
+    function journeyOK() {
+      return firstMoveFrame >= 0 && (framesRun - firstMoveFrame) >= 2;
+    }
+
+    // A rejection, not a verdict: it never latches cheatLogged, so a genuine
+    // clock or state verdict later in the run still gets its own line.
+    function logReject(kind) {
+      LOG('[AIMLAB] CHEAT kind=' + kind);
+    }
+
     function presenceOK(cx, cy) {
       if (moveT <= -1e8) return false;          // no trusted mouse movement at all yet
       var dx = cx - moveX, dy = cy - moveY;
@@ -1103,25 +1385,55 @@
       enterShame();
     }, true);
 
+    /* A long-press on a touchscreen fires contextmenu, so accusing every
+       contextmenu told a phone player resting a finger on the playfield that
+       they were poking at devtools. Suppress the menu for everyone; only count
+       it against a session that has never produced a touch. */
     on(root, 'contextmenu', function (e) {
       if (won) return;
       e.preventDefault();
+      if (sawTouch) return;
       onTamper(TAUNT_TOOLS, 'contextmenu');
     });
 
     on(window, 'click', function (e) {
-      if (won) return;
-      startTimer();
+      if (won || paused) return;
+
+      // The engine's own dialogs are not the playfield. Dismissing the shame box
+      // used to cost the player a miss and an error chord for a dialog the game
+      // put in front of them.
+      if (shameBox.contains(e.target) || overlay.contains(e.target) ||
+          pauseBox.contains(e.target)) return;
 
       // A press that failed the presence gate already counted as a miss. Whatever
       // click it produces, and wherever that click retargets to, must not count
-      // a second time.
-      if (NOW() - presenceBlockAt < 1000) { presenceBlockAt = -1e9; return; }
+      // a second time. Only a primary press yields a click at all, so only a
+      // primary press arms this -- a middle or right press used to leave the
+      // swallow armed and eat the player's next genuine winning click.
+      if (NOW() - presenceBlockAt < PRESENCE_SWALLOW_MS) { presenceBlockAt = -1e9; return; }
 
-      var onX = (e.target === btn) || btn.contains(e.target);
+      // B2: the button has no element children, so anything else claiming to be
+      // inside it is an injected overlay, not the close button.
+      var onX = (e.target === btn);
       if (onX) {
         // detail > 0 rules out keyboard activation; isTrusted rules out dispatched events
         if (e.isTrusted === true && e.detail > 0) {
+          // V2.7 item 1: touch and pen play the game but cannot end it.
+          if (!inputIsMouse(e)) {
+            logReject('touch');
+            showTaunt(TAUNT_TOUCH);
+            addMiss('touch');
+            return;
+          }
+          // B6/B7: a real run renders frames between the pointer arriving and the
+          // press landing. A single injected burst renders none.
+          if (!journeyOK()) {
+            logReject('teleport');
+            showTaunt(TAUNT_TELEPORT);
+            addMiss('teleport');
+            sus('teleport');
+            return;
+          }
           win();
           return;
         }
@@ -1319,11 +1631,32 @@
     function integrate(dtMs, t) {
       if (!(dtMs > 0)) dtMs = 1000 / 60;
 
-      if (dtMs > PAUSE_MS || pageHidden) {
+      /* A hidden tab receives no rAF callbacks in any shipping browser, so
+         "hidden while animating" is a contradiction and the flag is a lie. It
+         used to be cached from an unauthenticated visibilitychange, which made
+         two console lines enough to freeze the physics for free. Believe it for
+         a handful of frames, then stop. */
+      var hidden = !!document.hidden;
+      if (hidden) {
+        if (++hiddenFrames > 10) hidden = false;
+      } else {
+        hiddenFrames = 0;
+      }
+
+      if (dtMs > PAUSE_MS || hidden) {
+        // A genuine pause costs nothing, but a stall *loop* is not alt-tab.
+        if (dtMs > PAUSE_MS && !hidden) {
+          if (++pauseFrames > 3 && !stallFlagged) {
+            stallFlagged = true;
+            sus('stall');
+            showTaunt(TAUNT_LAG);
+          }
+        }
         accumMs = 0;                    // a pause is not lag; resync and move on
         simT = t;
         return 0;
       }
+      pauseFrames = 0;
 
       accumMs += dtMs;
       var n = 0;
@@ -1355,9 +1688,13 @@
     function frame(t) {
       if (stopped) return;
       rafId = RAF(frame);
+      framesRun++;
 
       var dtMs = t - lastT;
       lastT = t;
+
+      // Paused: the picture holds, the clock holds, and nothing is judged.
+      if (paused) return;
 
       integrate(dtMs, t);
       render();
@@ -1376,6 +1713,24 @@
       if (--attestIn <= 0) { attestIn = ATTEST_FRAMES; checkStructure(); attest(); }
 
       if (started) setText(elTime, fmt(t - shStartT.get()));
+    }
+
+    /* B5. rAF ids are a page-global integer namespace, so capturing the function
+       does not protect the loop it schedules: a sweep cancelling ids 1..400
+       stops the engine dead without touching anything the engine owns. This
+       heartbeat notices its own main loop has died and restarts it, which makes
+       the sweep pointless rather than merely detectable. */
+    function heartbeat() {
+      if (stopped || won || paused || !started) return;
+      if (document.hidden) return;              // no rAF is expected while hidden
+      var gap = NOW() - lastT;
+      if (gap < LOOP_DEAD_MS) return;
+      lastT = NOW();
+      accumMs = 0;
+      simT = lastT;
+      sus('loop-stall');
+      showTaunt(TAUNT_LAG);
+      rafId = RAF(frame);
     }
 
     /* ---------------- win ---------------- */
@@ -1466,8 +1821,11 @@
 
       setText(elTime, fmt(finalMs));
 
+      // Defence in depth behind the pause: the click handler already refuses to
+      // act while paused, so this should be unreachable -- but the best-time key
+      // is the one thing a pinned playfield must never be able to write.
       var isBest = false;
-      if (!cheated && RECORD_BEST) {
+      if (!cheated && RECORD_BEST && playable()) {
         isBest = (bestMs === null || finalMs < bestMs);
         if (isBest) {
           bestMs = finalMs;
@@ -1476,11 +1834,11 @@
       }
       showBest();
 
-      setText(el('ovTime'), fmt(finalMs));
-      setText(el('ovMiss'), m);
-      setText(el('ovNear'), nm);
-      setText(el('ovBest'), bestMs === null ? '--' : fmt(bestMs));
-      setText(el('ovNote'), isBest ? 'New best time.' : (RECORD_BEST ? '' : 'Seam run. Not recorded.'));
+      setText(elOvTime, fmt(finalMs));
+      setText(elOvMiss, m);
+      setText(elOvNear, nm);
+      setText(elOvBest, bestMs === null ? '--' : fmt(bestMs));
+      setText(elOvNote, isBest ? 'New best time.' : (RECORD_BEST ? '' : 'Seam run. Not recorded.'));
 
       // V2.7 layer H: the count is on the dialog only when there is one to show
       if (susN > 0) {
@@ -1525,16 +1883,16 @@
       if (stopped) return;
       stopped = true;
       CAF(rafId);
+      UNEVERY(watchdog);
       UNDELAY(tauntTimer);
       UNDELAY(winTimer);
+      UNDELAY(storeTimer);
+      for (var vi = 0; vi < voiceTimers.length; vi++) UNDELAY(voiceTimers[vi]);
+      voiceTimers.length = 0;
       stopAudio();
       killErrorVoices();
       if (mo) { mo.disconnect(); mo = null; }
       if (mo2) { mo2.disconnect(); mo2 = null; }
-      if (ownCtx) {
-        try { ownCtx.close(); } catch (e) { /* already closed */ }
-        ownCtx = null;
-      }
       offAll();
       if (root.parentNode) root.parentNode.removeChild(root);
     }
@@ -1549,13 +1907,13 @@
     watchDom();
 
     // V2.7 layer A: a hidden tab is paused, not throttled, so it never bills debt.
+    // integrate() reads document.hidden live and disbelieves it if rAF keeps
+    // arriving, so nothing is cached from this event any more.
     on(document, 'visibilitychange', function () {
-      pageHidden = !!document.hidden;
-      if (!pageHidden) accumMs = 0;
+      if (!document.hidden) { accumMs = 0; lastT = NOW(); }
     });
-    pageHidden = !!document.hidden;
 
-    if (storeCorrupt) DELAY(function () { showTaunt(TAUNT_STORE); }, 600);
+    if (storeCorrupt) storeTimer = DELAY(function () { showTaunt(TAUNT_STORE); }, 600);
 
     // V2.7 layer E: taunt only, never a verdict. A modified build is the one
     // finding this engine is not allowed to be sure about.
@@ -1571,7 +1929,14 @@
 
     lastT = NOW();
     simT = lastT;
+    /* Ruling 1: the clock starts when the chase does. Entering a mode is itself a
+       deliberate gesture, and starting on first input let a player park the
+       cursor, start the run from the keyboard and click a card that had never
+       moved -- a two-millisecond "record" with no tampering of any kind. */
+    startTimer();
+    checkPlayable();
     rafId = RAF(frame);
+    watchdog = EVERY(heartbeat, 500);
 
     return Object.freeze({ stop: stop, setAudio: setAudio });
   }

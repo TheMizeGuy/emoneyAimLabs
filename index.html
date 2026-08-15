@@ -15,10 +15,10 @@
      anyone editing it can delete this block, so attesting it buys nothing. -->
 <script type="application/json" data-aimlab-build="1">
 {
-  "js/sentinel.js": "UNSTAMPED",
-  "js/chase.js": "UNSTAMPED",
-  "js/flappy.js": "UNSTAMPED",
-  "js/main.js": "UNSTAMPED"
+  "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
+  "js/chase.js": "45894282756604102709426688fa4b44045ce0b9a2f73732a2fc3d8b0bf34b34",
+  "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
+  "js/main.js": "c39e59237058f62e48c12fbb7c5753486b0e1972a3adcc0820170bbac611a5e7"
 }
 </script>
 <style>
@@ -161,10 +161,22 @@
   }
 
   .startpitch {
-    margin: 9px 0 22px;
+    margin: 9px 0 12px;
     font-size: 13px;
     line-height: 1.5;
     color: var(--muted);
+  }
+
+  /* V2.7 item 1: said up front, because a phone player can chase the window all
+     day and never be allowed to close it. */
+  .startreq {
+    margin: 0 0 22px;
+    padding: 8px 10px;
+    border-left: 2px solid var(--accent);
+    background: rgba(255, 192, 97, 0.06);
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--ink);
   }
 
   .mode {
@@ -218,11 +230,13 @@
     cursor: crosshair;
   }
 
+  /* Ruling 4: above .wrap (20). The window flying over the live timer was
+     authentic Win95 behaviour and useless in a timed mode. */
   .hud {
     position: fixed;
     top: 16px;
     left: 16px;
-    z-index: 10;
+    z-index: 30;
     pointer-events: none;
     display: grid;
     gap: 3px;
@@ -261,7 +275,7 @@
     letter-spacing: 0.02em;
   }
 
-  .hud .row.best .v { color: #006b1f; }
+  .hud .row.best .v { color: #004d15; }   /* 5.57:1 on #c0c0c0; #006b1f was 3.70:1 */
   .hud .row.hide { display: none; }
 
   /* V2.7 layer H: the sus meter, styled like a Win95 tray warning. It is
@@ -322,7 +336,7 @@
     margin: 5px 0 0;
     font-size: 12.5px;
     line-height: 1.45;
-    color: #dbeeee;
+    color: #ffffff;                      /* 4.77:1 on teal; #dbeeee was 3.97:1 */
     text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
   }
 
@@ -345,7 +359,8 @@
     background: var(--w95-face);
     border: 2px solid;
     border-color: var(--w95-hilite) var(--w95-dark) var(--w95-dark) var(--w95-hilite);
-    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+    /* no drop shadow: Windows 95 had none, and a 35px blur trailing the window
+       across a desktop the spec calls "flat solid teal" is the loudest tell */
   }
 
   /* step two: white top/left, #808080 bottom/right */
@@ -433,18 +448,27 @@
     -webkit-user-drag: none;
   }
 
-  /* Win95 tooltip yellow */
+  /* Win95 tooltip yellow.
+     The bubble is far wider than the 136px window it hangs off, so it used to
+     clip against `overflow: hidden` through roughly a quarter of the playfield
+     and all of the bottom edge -- going dark exactly in the corner where the
+     endgame is played, and taking the whole anti-cheat response mechanism with
+     it. width:max-content plus a viewport cap keeps it readable, and chase.js
+     slides it horizontally and flips it above the card near the bottom. */
   .taunt {
     position: absolute;
     left: 50%;
     top: calc(100% + 9px);
+    width: max-content;
+    max-width: min(340px, calc(100vw - 24px));
     padding: 4px 8px;
     border: 1px solid #000;
     background: var(--w95-tip);
     color: #000;
     font-family: var(--w95);
     font-size: 12px;
-    white-space: nowrap;
+    line-height: 1.35;
+    white-space: normal;
     opacity: 0;
     transform: translate(-50%, 5px);
     transition: opacity 0.12s ease-out, transform 0.12s ease-out;
@@ -454,6 +478,15 @@
     opacity: 1;
     transform: translate(-50%, 0);
   }
+
+  /* flipped above the window when it would fall off the bottom of the screen */
+  .taunt.up {
+    top: auto;
+    bottom: calc(100% + 9px);
+    transform: translate(-50%, -5px);
+  }
+
+  .taunt.up.on { transform: translate(-50%, 0); }
 
   .card.gone {
     animation: pop 0.28s cubic-bezier(0.4, 0, 0.9, 0.4) forwards;
@@ -488,8 +521,7 @@
     border-color: var(--w95-hilite) var(--w95-dark) var(--w95-dark) var(--w95-hilite);
     box-shadow:
       inset 2px 2px 0 var(--w95-light),
-      inset -2px -2px 0 var(--w95-shadow),
-      0 20px 60px rgba(0, 0, 0, 0.5);
+      inset -2px -2px 0 var(--w95-shadow);
     color: #000;
     text-align: center;
   }
@@ -560,18 +592,40 @@
     color: #3d3d3d;
   }
 
+  /* Parked at the bottom rather than dead centre: the dialog is dismissible and
+     no longer costs a miss, but while it is up its own box is the one place the
+     card cannot be clicked, and the middle of the board is the worst place to
+     put that. */
   .shame {
     position: fixed;
     inset: 0;
     z-index: 55;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: center;
     padding: 24px;
     pointer-events: none;
   }
 
   .shame.hide { display: none; }
+
+  /* Ruling 3: shown when the viewport is too small for the card to flee in.
+     Blocks the playfield outright -- while it is up the run is frozen, the clock
+     is stopped and clicks are inert -- and disappears the moment the window is
+     big enough again. */
+  .pausebox {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 34, 34, 0.55);
+  }
+
+  .pausebox.hide { display: none; }
+  .pausebox .ovcard { width: min(360px, 100%); }
 
   /* the dialog takes clicks, the rest of the screen keeps playing */
   .shame .ovcard { pointer-events: auto; width: min(340px, 100%); }
@@ -591,7 +645,7 @@
     height: 15px;
     font-family: var(--w95);
     font-size: 12px;
-    color: #006b1f;
+    color: #004d15;
   }
 
   .ovstats {
@@ -696,6 +750,7 @@
     <p class="startkicker">Range brief</p>
     <h1 class="starttitle">eMoney Aim Labs</h1>
     <p class="startpitch">A popup with survival instincts. Land the close button.</p>
+    <p class="startreq">A mouse is required to win. Touch and pen play, but only a real mouse click closes the window.</p>
 
     <button class="mode" id="btnPractice" type="button">Practice Mode</button>
     <p class="modenote">Straight to the chase. Timed, silent, one window between you and a clean desktop.</p>

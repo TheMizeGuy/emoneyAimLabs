@@ -21,9 +21,9 @@
  *      rolling checksum, cross-checked against the physics counter every step.
  *      A divergence taints the run and the chase that follows opens with the
  *      CHEAT DETECTED dialog instead of a timer.
- *   F. inter-flap intervals are collected per run; twenty of them inside a two
- *      percent coefficient of variation is a metronome, not a person. Costs a
- *      sus point and a line of text, never a life.
+ *   F. inter-flap intervals roll in a twelve-wide window that survives deaths;
+ *      a coefficient of variation under five percent is a metronome, not a
+ *      person. Costs a sus point and a line of text, never a life.
  * Both counts ride to the chase engine through onComplete(info).
  */
 (function () {
@@ -36,6 +36,7 @@
   var NOWF = (WF.performance && WF.performance.now)
     ? WF.performance.now.bind(WF.performance)
     : Date.now.bind(Date);
+  var WARNF = (WF.console && WF.console.warn) ? WF.console.warn.bind(WF.console) : LOGF;
 
   /* ---- PHYSICS CORE START ----
    * Everything between these markers is pure logic with no DOM dependency, so
@@ -184,8 +185,20 @@
 
   var sessionBest = 0;               /* best across runs in this page session */
 
-  var CADENCE_MIN_INTERVALS = 20;    /* V2.7 layer F: intervals needed before judging */
-  var CADENCE_CV = 0.02;             /* below this a human is not driving */
+  /* V2.7 layer F. Both of the original numbers made this detector unreachable
+   * against the only thing it exists to catch:
+   *   - 20 intervals meant 21 flaps in ONE run, and the buffer was cleared on
+   *     every death. A rigid metronome cannot thread a 115 px gap and dies in
+   *     about five flaps, so it never accumulated enough to be judged at all.
+   *   - a 0.02 CV threshold sits BELOW the noise floor of the medium: one frame
+   *     of jitter at 60 Hz on a half-second cadence is already 2.9 % CV, so any
+   *     bot driving from a frame callback passed by construction.
+   * The window is now short, rolls across deaths (intervals that span a death
+   * are skipped, not counted), and the threshold sits between a frame-quantised
+   * bot (~3 %) and the least variable plausible human (10 %+). */
+  var CADENCE_MIN_INTERVALS = 12;    /* rolling window, not a whole-run total */
+  var CADENCE_CV = 0.05;             /* below this a human is not driving */
+  var CADENCE_MIN_GAP = 30;          /* ms; below this it is one tap counted twice */
   var NOTE_SECONDS = 3;              /* how long a detection stays on the canvas */
 
   /* ---- triple-shadow score (V2.7 layer C) ----
@@ -542,9 +555,7 @@
     opts = opts || {};
 
     if (!container || typeof container.appendChild !== 'function') {
-      if (typeof console !== 'undefined' && console.warn) {
-        console.warn('[AIMLAB] FLAPPY start called without a container element');
-      }
+      WARNF('[AIMLAB] FLAPPY start called without a container element');
       return Object.freeze({ stop: function () {} });
     }
 
@@ -554,6 +565,15 @@
 
     var doc = container.ownerDocument || document;
     var win = doc.defaultView || window;
+
+    /* One game per container. A second start() used to leave the first running
+     * with no handle to stop it: two rAF loops, two keydown listeners and two
+     * canvases stacked on the same node. */
+    if (container.getAttribute('data-aimlab-flappy') === 'live') {
+      WARNF('[AIMLAB] FLAPPY already running in this container');
+      return { stop: function () {} };
+    }
+    container.setAttribute('data-aimlab-flappy', 'live');
 
     var prevPosition = container.style.position;
     var computed = win.getComputedStyle ? win.getComputedStyle(container) : null;
@@ -607,17 +627,24 @@
     var ro = null;
 
     /* V2.7 layers C and F. susN and tainted are per session and ride to the
-     * chase engine; flaps and cadenceFlagged reset with every run, so the
-     * metronome verdict fires at most once per run. */
+     * chase engine. The interval window and the verdict are per session too:
+     * whatever is driving the input does not become a different thing because
+     * the bird hit a pipe. */
     var shScore = newShadow('score', 0, onDiverge);
     var tainted = false;
     var susN = 0;
-    var flaps = [];
+    var intervals = [];          /* rolling, survives deaths */
+    var lastFlapT = 0;           /* 0 = no interval may start here (fresh run) */
     var cadenceFlagged = false;
     var noteText = '';
     var noteUntil = -1;
 
     function log(msg) { LOGF(msg); }
+
+    function sus(reason) {
+      susN++;
+      log('[AIMLAB] SUS n=' + susN + ' reason=' + reason);
+    }
 
     function note(text) {
       noteText = text;
@@ -638,21 +665,20 @@
      * playing by hand can reach. It never blocks, resets or costs a life. */
     function cadenceCheck() {
       if (cadenceFlagged) { return; }
-      var n = flaps.length - 1;
+      var n = intervals.length;
       if (n < CADENCE_MIN_INTERVALS) { return; }
       var i, d, sum = 0;
-      for (i = 0; i < n; i++) { sum += flaps[i + 1] - flaps[i]; }
+      for (i = 0; i < n; i++) { sum += intervals[i]; }
       var mean = sum / n;
       if (!(mean > 0)) { return; }
       var vsum = 0;
       for (i = 0; i < n; i++) {
-        d = (flaps[i + 1] - flaps[i]) - mean;
+        d = intervals[i] - mean;
         vsum += d * d;
       }
       if (Math.sqrt(vsum / n) / mean >= CADENCE_CV) { return; }
       cadenceFlagged = true;
-      susN++;
-      log('[AIMLAB] SUS n=' + susN + ' reason=cadence');
+      sus('cadence');
       note('METRONOME DETECTED');
     }
 
@@ -688,8 +714,10 @@
     function resetRun() {
       world = makeWorld(Math.random);
       shScore = newShadow('score', 0, onDiverge);
-      flaps = [];
-      cadenceFlagged = false;
+      /* intervals deliberately survive: cadence is a property of whatever is
+       * driving the input, not of a single run. lastFlapT resets so the long
+       * gap across a death is never counted as an interval. */
+      lastFlapT = 0;
       view.tilt = 0;
       view.tiltHold = 0;
       view.flash = 0;
@@ -711,8 +739,20 @@
         view.tiltHold = 0.13;
         view.wing = 0;
         if (state === 'playing') {
-          flaps.push(NOWF());
-          cadenceCheck();
+          var ft = NOWF();
+          /* A touchscreen delivers pointerdown AND touchstart for one physical
+           * tap, and worldFlap accepts both, so the pair used to land a ~0 ms
+           * interval in the buffer and wreck the statistic. Nothing human or
+           * mechanical flaps twice inside CADENCE_MIN_GAP; below it, the second
+           * event is the same tap arriving twice. */
+          if (lastFlapT > 0 && (ft - lastFlapT) >= CADENCE_MIN_GAP) {
+            intervals.push(ft - lastFlapT);
+            if (intervals.length > CADENCE_MIN_INTERVALS) { intervals.shift(); }
+            lastFlapT = ft;
+            cadenceCheck();
+          } else if (lastFlapT <= 0) {
+            lastFlapT = ft;
+          }
         }
       }
     }
@@ -790,19 +830,21 @@
          * ahead, it just gets noticed. */
         if (shScore.get() !== world.score) { onDiverge(); }
 
-        if (shScore.get() >= targetScore) {
-          log('[AIMLAB] FLAPPY DONE');
-          if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }
-          view.flash = 1;
-          setState('complete');
-          return;
-        }
-
+        /* Death is tested first. A pipe stays lethal for ~11 px after it
+         * becomes scorable, so clipping the tenth pair's cap on the frame it
+         * clears your nose used to complete the gauntlet and discard the death.
+         * Classic rules: the death wins the tie. */
         if (world.diedThisStep) {
           log('[AIMLAB] FLAPPY DEATH score=' + shScore.get());
           if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }
           view.flash = 1;
           setState('dead');
+        } else if (shScore.get() >= targetScore) {
+          log('[AIMLAB] FLAPPY DONE');
+          if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }
+          view.flash = 1;
+          setState('complete');
+          return;
         }
       } else if (state === 'dead') {
         worldStep(world, dt);
@@ -827,8 +869,19 @@
         completeFired = true;
         /* The handoff is unchanged -- same trigger, same moment, same call. The
          * argument is additive: main.js forwards it to the chase engine so the
-         * sus counter and any state verdict survive the transition. */
-        if (onComplete) { onComplete({ sus: susN, stateCheat: tainted }); }
+         * sus counter and any state verdict survive the transition.
+         * Wrapped because this runs inside a rAF callback, where a throw is
+         * reported and then swallowed: the next frame is already scheduled and
+         * completeFired is already true, so an unguarded throw left the loop
+         * running forever on a frozen victory card that could never hand off. */
+        if (onComplete) {
+          try {
+            onComplete({ sus: susN, stateCheat: tainted });
+          } catch (e) {
+            WARNF('[AIMLAB] FLAPPY onComplete threw: ' + (e && e.message));
+            stop();
+          }
+        }
       }
     }
 
@@ -906,21 +959,71 @@
       }
     }
 
+    /* V2.7 layer A, applied here at last. Integrating straight from the frame
+     * delta meant a tab throttled to 10 fps advanced roughly a third of a second
+     * of game time per wall second: human reaction time is fixed in wall time,
+     * so slow motion shrank it in game time and took the gauntlet from about two
+     * attempts per clear to one. Fixed 8 ms sub-steps off the captured clock fix
+     * the rate; the same pause/slideshow guards the chase uses keep an honest
+     * hitch from ever billing debt. */
+    var FIX_DT_MS = 8, FIX_DT = 0.008, FIX_MAX = 8;
+    var FIX_PAUSE_MS = 1500, FIX_SLIDESHOW_MS = 120;
+    var FIX_DEBT_MAX = 2000, FIX_HEAL_MS = 40, FIX_HEAL_STEP = 8;
+    var accumMs = 0, lagDebtMs = 0, lagFlagged = false;
+
     function frame(ts) {
       if (stopped) { return; }
       rafId = win.requestAnimationFrame(frame);
-      if (!lastTs) { lastTs = ts; }
-      var dt = (ts - lastTs) / 1000;
-      lastTs = ts;
-      if (!(dt > 0)) { dt = 0; }
-      if (dt > 0.032) { dt = 0.032; }
-      advance(dt);
+
+      var nowMs = NOWF();
+      if (!lastTs) { lastTs = nowMs; }
+      var dtMs = nowMs - lastTs;
+      lastTs = nowMs;
+
+      if (dtMs > FIX_PAUSE_MS || doc.hidden) {
+        accumMs = 0;                       // alt-tab, sleep, a breakpoint: free
+      } else {
+        accumMs += dtMs;
+        var n = 0;
+        while (accumMs >= FIX_DT_MS && n < FIX_MAX) {
+          accumMs -= FIX_DT_MS;
+          advance(FIX_DT);
+          n++;
+        }
+        if (accumMs >= FIX_DT_MS) {
+          var dropped = accumMs - (accumMs % FIX_DT_MS);
+          accumMs -= dropped;
+          if (dtMs > FIX_SLIDESHOW_MS) { lagDebtMs += dropped; }
+        }
+        if (dtMs <= FIX_HEAL_MS && lagDebtMs > 0) {
+          lagDebtMs -= FIX_HEAL_STEP;
+          if (lagDebtMs < 0) { lagDebtMs = 0; }
+        }
+        if (lagDebtMs > FIX_DEBT_MAX && !lagFlagged) {
+          lagFlagged = true;
+          note('slowed to a crawl');
+          sus('lag-debt');
+        }
+      }
+
       render();
     }
 
     function stop() {
       if (stopped) { return; }
       stopped = true;
+      container.removeAttribute('data-aimlab-flappy');
+      /* The run was already won; the 600 ms victory beat just had not elapsed.
+       * Tearing down in that window used to discard the handoff entirely and
+       * strand the player on an empty stage after they had earned the points. */
+      if (state === 'complete' && !completeFired && onComplete) {
+        completeFired = true;
+        try {
+          onComplete({ sus: susN, stateCheat: tainted });
+        } catch (e) {
+          WARNF('[AIMLAB] FLAPPY onComplete threw: ' + (e && e.message));
+        }
+      }
       if (rafId) { win.cancelAnimationFrame(rafId); rafId = 0; }
       wrap.removeEventListener('pointerdown', onPointerDown);
       wrap.removeEventListener('touchstart', onTouchStart);
