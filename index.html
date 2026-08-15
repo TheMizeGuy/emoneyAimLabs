@@ -16,9 +16,9 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "45894282756604102709426688fa4b44045ce0b9a2f73732a2fc3d8b0bf34b34",
+  "js/chase.js": "be7d7a1244b5ffe3e90322957a1c394ddd150a41b14acdafe8ccf8893e2b3991",
   "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
-  "js/main.js": "c39e59237058f62e48c12fbb7c5753486b0e1972a3adcc0820170bbac611a5e7"
+  "js/main.js": "7a97a4c251eeec91557f67a4c0fa31e8f7e77cfcc09332ccc4b6247915c54a23"
 }
 </script>
 <style>
@@ -133,12 +133,50 @@
   .startcard {
     position: relative;
     z-index: 1;
-    width: min(420px, 100%);
+    width: min(520px, 100%);
     padding: 24px 24px 20px;
     border: 1px solid var(--line-2);
     border-radius: 4px;
     background: var(--panel);
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  }
+
+  /* ---- hero ---- */
+
+  .hero {
+    margin: 0 0 22px;
+    padding: 0 0 20px;
+    border-bottom: 1px solid var(--line);
+    text-align: center;
+  }
+
+  .herotitle {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 21px;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: 0.02em;
+    color: var(--ink);
+  }
+
+  .herotag {
+    margin: 8px 0 16px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+  }
+
+  .heroclip {
+    display: block;
+    width: 440px;
+    max-width: 90vw;
+    height: auto;
+    margin: 0 auto;
+    border: 1px solid var(--line-2);
+    border-radius: 3px;
+    background: #000;
   }
 
   .startkicker {
@@ -266,6 +304,21 @@
   .hud .v {
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
+    color: #000;
+  }
+
+  .hud .row.mode {
+    grid-template-columns: 1fr;
+    margin-bottom: 2px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--w95-shadow);
+  }
+
+  .hud .row.mode .v {
+    font-family: var(--w95);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
     color: #000;
   }
 
@@ -747,6 +800,12 @@
 
 <div class="start" id="startScreen">
   <div class="startcard">
+    <div class="hero">
+      <p class="herotitle">Relive the August 14th Incident</p>
+      <p class="herotag">Experience 4DX simulation like never before</p>
+      <img class="heroclip" src="./assets/4dx.avif" alt="simulation footage" width="440" height="320">
+    </div>
+
     <h1 class="starttitle">eMoney Aim Labs</h1>
     <p class="startpitch">A popup with survival instincts. Land the close button.</p>
 

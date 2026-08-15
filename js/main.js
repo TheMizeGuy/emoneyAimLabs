@@ -166,6 +166,7 @@
       imageW: PRACTICE.imageW,
       imageH: PRACTICE.imageH,
       bestKey: PRACTICE.bestKey,
+      modeLabel: 'PRACTICE',
       recordBest: !isSeam,
       // V2.8: practice is silent. No loop, no error chord, no AudioContext -- the
       // engine never builds one, so there is nothing here to autoplay-gate.
@@ -210,6 +211,7 @@
       imageW: SIMULATION.imageW,
       imageH: SIMULATION.imageH,
       bestKey: SIMULATION.bestKey,
+      modeLabel: 'SIMULATION',
       recordBest: !isSeam,
       susSeed: (info && info.sus > 0) ? info.sus : 0,
       stateCheat: !!(info && info.stateCheat),

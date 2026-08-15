@@ -124,6 +124,7 @@
 
   var MARKUP = [
     '<div class="hud" data-el="hud">',
+    '<div class="row mode"><span class="v" data-el="mode">PRACTICE</span></div>',
     '<div class="row time"><span class="k">TIME</span><span class="v" data-el="time">00:00.000</span></div>',
     '<div class="row"><span class="k">MISSES</span><span class="v" data-el="miss">0</span></div>',
     '<div class="row"><span class="k">NEAR</span><span class="v" data-el="near">0</span></div>',
@@ -205,17 +206,43 @@
     /* V2.2 retune: values marked (v1 N) were raised to make the chase harder.
        Everything unmarked is the v1 value, unchanged. Measurements for the new
        set are in the shell-integrator blackboard. */
-    var FLEE_RADIUS        = 340;    // px, cursor -> nearest point of the card rect     (v1 300)
-    var FLEE_ACCEL         = 9000;   // px/s^2 at d = 0, scaled by (1 - d/R)^2
+    var FLEE_RADIUS        = 470;    // px, cursor -> nearest point of the card rect     (v1 300)
+    var FLEE_ACCEL         = 12500;   // px/s^2 at d = 0, scaled by (1 - d/R)^2
     var DODGE_GAIN         = 3.2;    // perpendicular px/s^2 per px/s of cursor approach (v1 2.2)
-    var DODGE_APPROACH_CAP = 2400;   // px/s
+    var DODGE_APPROACH_CAP = 4200;   // px/s
     var DODGE_HOLD_MS      = 300;    // dodge sign stays put this long so the swerve reads as intent
     var BASE_SPEED         = 190;    // px/s idle wander                                 (v1 150)
     var WANDER_GAIN        = 4.0;    // 1/s, how hard wander steers velocity toward its target
-    var SPEED_CAP_FAR      = 1850;   //                                                  (v1 1600)
-    var SPEED_CAP_NEAR_ADD = 550;    // FAR + NEAR_ADD lands exactly on the hard cap      (v1 500)
-    var SPEED_CAP_HARD     = 2400;   // absolute ceiling, shame mode included             (v1 2100)
-    var RESTITUTION        = 0.93;   // less energy bled per wall bounce                  (v1 0.9)
+    var SPEED_CAP_FAR      = 2050;   //                                                  (v1 1600)
+    var SPEED_CAP_NEAR_ADD = 650;    // FAR + NEAR_ADD lands exactly on the hard cap      (v1 500)
+    var SPEED_CAP_HARD     = 2700;   // absolute ceiling, shame mode included             (v1 2100)
+    var RESTITUTION        = 0.93;   // bounce loss when nobody is threatening it         (v1 0.9)
+
+    /* V2.9 -- the corner pocket is closed.
+       The old pin worked because three things compounded: the flee vector pointed
+       into the walls, every bounce bled 7 percent, and the card had no move except
+       to rattle. Restitution now climbs toward elastic exactly while the cursor is
+       close, so a threatened card keeps its energy; a wall-hug slide gives it a
+       legal direction to run when the diagonal is blocked; and a bait-then-jink
+       cycle punishes the flick the pocket used to invite. */
+    var RESTITUTION_HOT    = 0.995;  // at prox 1: a threatened bounce loses almost nothing
+    var SLIDE_PROX         = 0.30;   // cursor this close before the slide arms
+    var SLIDE_BAND         = 150;    // px from a wall that counts as pinned
+    var SLIDE_ACCEL        = 7600;   // px/s^2 along the wall, scaled by prox
+    var SLIDE_HOLD_MIN     = 250;    // ms; the side is held this long so it reads as intent
+    var SLIDE_HOLD_MAX     = 350;
+    var SLIDE_MIN_ROOM     = 90;     // px; never commit to a side with less room than this
+    var BAIT_PROX_MIN      = 0.25;   // the bait only makes sense mid-approach
+    var BAIT_PROX_MAX      = 0.80;
+    var BAIT_CHANCE        = 0.004;  // per sub-step, so about once every two seconds in range
+    var BAIT_MS            = 150;    // the lull that invites the flick
+    var BAIT_DAMP          = 7.0;    // 1/s of velocity damping during the lull
+    var JINK_MS            = 190;    // and the sidestep that answers it
+    var JINK_ACCEL         = 9500;   // px/s^2 perpendicular, scaled by prox
+    var BAIT_COOL_MS       = 900;    // no second bait until this clears
+    var FLOOR_PROX         = 0.25;   // being threatened at all arms the no-loiter floor
+    var FLOOR_SPEED        = 1150;   // px/s it is pushed back up to, scaled by prox
+    var FLOOR_GAIN         = 7.0;    // 1/s; smooth, so there is no visible speed step
     var BOUNCE_JITTER      = 10 * Math.PI / 180;
     var PANIC_MS           = 260;
     var PANIC_ACCEL        = 4000;
@@ -231,6 +258,10 @@
     var PLAY_MARGIN        = 200;    // room the card needs beyond its own size, or the run pauses
     var LATCH_MAX_MS       = 600;    // failsafe so a lost pointerup cannot freeze the card forever
     var BEST_KEY           = (typeof opts.bestKey === 'string' && opts.bestKey) ? opts.bestKey : DEFAULT_BEST_KEY;
+    // Which mode the HUD announces. Static per run, so it is re-derived from
+    // this constant rather than read back off the node it is printed on.
+    var MODE_LABEL         = (typeof opts.modeLabel === 'string' && opts.modeLabel)
+                             ? opts.modeLabel.toUpperCase() : 'PRACTICE';
     var RECORD_BEST        = (opts.recordBest !== false);
 
     /* V2.4: the error chord, synthesized. No Microsoft audio is fetched or shipped. */
@@ -354,6 +385,7 @@
     var elMiss    = el('miss');
     var elNear    = el('near');
     var elBest    = el('best');
+    var elMode    = el('mode');
     var rowBest   = el('bestRow');
     var rowSus    = el('susRow');
     var elSus     = el('sus');
@@ -426,6 +458,10 @@
     var velX = 0, velY = 0, velT = 0;
 
     var dodgeSign = 1, dodgeAt = 0;
+    // V2.9: live restitution, the held slide side, and the bait/jink cycle
+    var restNow = RESTITUTION;
+    var slideSign = 1, slideAt = -1e9, slideHold = SLIDE_HOLD_MIN;
+    var baitUntil = 0, jinkUntil = 0, jinkSign = 1, baitCoolUntil = 0;
     var overlapping = false, panicUntil = 0;
     var burstUntil = 0;
     var pressLatch = false, pressLatchAt = 0;
@@ -774,6 +810,7 @@
     function reproject() {
       var fixed = 0;
       var m = shMisses.get(), nm = shNear.get();
+      fixed += reassert(elMode, MODE_LABEL);
       fixed += reassert(elMiss, m);
       fixed += reassert(elNear, nm);
       if (susN > 0) fixed += reassert(elSus, susN);
@@ -1462,8 +1499,8 @@
     function bounce(nx, ny) {
       // n points back into the playfield; vn is negative because we only call this on impact
       var vn = vx * nx + vy * ny;
-      vx -= (1 + RESTITUTION) * vn * nx;
-      vy -= (1 + RESTITUTION) * vn * ny;
+      vx -= (1 + restNow) * vn * nx;
+      vy -= (1 + restNow) * vn * ny;
 
       var a = (rnd() * 2 - 1) * BOUNCE_JITTER;
       var c = Math.cos(a), s = Math.sin(a);
@@ -1532,6 +1569,84 @@
         var dodge = dodgeSign * DODGE_GAIN * approach * p2;
         ax += -awy * dodge;
         ay += awx * dodge;
+      }
+
+      /* V2.9a. A threatened card keeps its energy. Outside the flee radius the
+         old 0.93 still applies, so an idle card settles exactly as before; as
+         the cursor closes, bounces go almost perfectly elastic and the corner
+         stops being a place where speed goes to die. */
+      restNow = RESTITUTION + (RESTITUTION_HOT - RESTITUTION) * prox;
+
+      /* V2.9b -- wall-hug escape slide. Pinned against a wall with the cursor
+         inside the flee radius, the repulsion vector points into the wall and
+         the card has no legal escape along it. Steer along the wall instead.
+         The side is pseudo-random but held a quarter second so a player can read
+         and cut it off, and it is never chosen into a corner with no room. */
+      if (hasPointer && prox > SLIDE_PROX) {
+        var dLeft = x - minX, dRight = maxX - x;
+        var dTop = y - minY, dBot = maxY - y;
+        var nearH = Math.min(dLeft, dRight);
+        var nearV = Math.min(dTop, dBot);
+        if (Math.min(nearH, nearV) < SLIDE_BAND) {
+          // slide along whichever wall is closest: the tangent is its long axis
+          var alongY = (nearH <= nearV);
+          if (now - slideAt > slideHold) {
+            slideAt = now;
+            slideHold = SLIDE_HOLD_MIN + rnd() * (SLIDE_HOLD_MAX - SLIDE_HOLD_MIN);
+            slideSign = (rnd() < 0.5) ? -1 : 1;
+            // never commit to the short end of a corner
+            var room = alongY ? (slideSign < 0 ? dTop : dBot)
+                              : (slideSign < 0 ? dLeft : dRight);
+            if (room < SLIDE_MIN_ROOM) slideSign = -slideSign;
+          }
+          var slide = SLIDE_ACCEL * prox * slideSign;
+          if (alongY) ay += slide; else ax += slide;
+        }
+      }
+
+      /* V2.9a, second half. Elastic bounces stop the pocket draining energy, but
+         the card can still coast to a crawl on its own. While it is being
+         threatened it is pushed back up along its current heading -- smoothly,
+         so there is no visible snap -- which is what makes "wait for it to slow
+         down, then flick" stop working. Below prox it is untouched, so an
+         unthreatened card still drifts at its lazy wander speed. */
+      if (hasPointer && prox > FLOOR_PROX) {
+        var spNow = Math.sqrt(vx * vx + vy * vy);
+        var spFloor = FLOOR_SPEED * prox;
+        if (spNow > 1 && spNow < spFloor) {
+          var boost = (spFloor - spNow) * FLOOR_GAIN;
+          ax += (vx / spNow) * boost;
+          ay += (vy / spNow) * boost;
+        }
+      }
+
+      /* V2.9c -- bait and jink. A short lull invites the flick the pocket used
+         to reward, then the card cuts hard across the approach. Seeded off the
+         same xorshift as everything else, and it only ever adds acceleration --
+         there is no teleport here. */
+      if (hasPointer && prox > BAIT_PROX_MIN && prox < BAIT_PROX_MAX &&
+          baitUntil === 0 && jinkUntil === 0 && now > baitCoolUntil && rnd() < BAIT_CHANCE) {
+        baitUntil = now + BAIT_MS;
+        jinkSign = (rnd() < 0.5) ? -1 : 1;
+      }
+      if (baitUntil > 0) {
+        if (now < baitUntil) {
+          ax -= vx * BAIT_DAMP;                 // the lull
+          ay -= vy * BAIT_DAMP;
+        } else {
+          baitUntil = 0;
+          jinkUntil = now + JINK_MS;
+        }
+      }
+      if (jinkUntil > 0) {
+        if (now < jinkUntil) {
+          var jink = JINK_ACCEL * prox * jinkSign;
+          ax += -awy * jink;                    // hard across the cursor's line
+          ay += awx * jink;
+        } else {
+          jinkUntil = 0;
+          baitCoolUntil = now + BAIT_COOL_MS;
+        }
       }
 
       // Wander steering fades out as the cursor closes in, and is what pulls speed back down
@@ -1899,6 +2014,7 @@
 
     /* ---------------- boot ---------------- */
 
+    setText(elMode, MODE_LABEL);
     showBest();
     renderSus();                 // only visible if flappy already saw something
     measure();
