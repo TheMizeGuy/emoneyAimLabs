@@ -7,6 +7,20 @@
 <title>eMoney Aim Labs</title>
 <!-- data: icon so the browser never issues a /favicon.ico request -->
 <link rel="icon" href="data:,">
+<!-- Build manifest for js/sentinel.js (V2.7 layer E). Not a global: the sentinel
+     reads this element out of the DOM. Every value ships as the literal
+     "UNSTAMPED", which disables the check; replace each with the lowercase
+     SHA-256 hex of that file (shasum -a 256 js/*.js) at the final commit. A file
+     left UNSTAMPED is simply not attested. index.html is deliberately absent:
+     anyone editing it can delete this block, so attesting it buys nothing. -->
+<script type="application/json" data-aimlab-build="1">
+{
+  "js/sentinel.js": "UNSTAMPED",
+  "js/chase.js": "UNSTAMPED",
+  "js/flappy.js": "UNSTAMPED",
+  "js/main.js": "UNSTAMPED"
+}
+</script>
 <style>
 /* ======================================================================
    All styles for the whole site live in this one block. Ownership:
@@ -249,6 +263,40 @@
 
   .hud .row.best .v { color: #006b1f; }
   .hud .row.hide { display: none; }
+
+  /* V2.7 layer H: the sus meter, styled like a Win95 tray warning. It is
+     display:none until the first soft detection, so a clean run never shows it. */
+  .hud .tray {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 3px 7px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    font-family: var(--w95);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: #7a0000;
+  }
+
+  .hud .tray.hide { display: none; }
+
+  /* the warning triangle, drawn with borders rather than shipped */
+  .hud .tray .warn {
+    flex: none;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 9px solid #d4a017;
+  }
+
+  .hud .tray .v {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: #7a0000;
+  }
 
   .sig {
     position: fixed;
@@ -574,6 +622,39 @@
     color: #000;
   }
 
+  /* V2.7 layer G: the signed win line, echoed in the dialog as a sunken field */
+  .ovsig {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 0 0 14px;
+    padding: 4px 8px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    font-family: var(--w95);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: #3d3d3d;
+  }
+
+  .ovsig .v {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    color: #000;
+  }
+
+  /* V2.7 layer H: sus count on the win dialog, present only when nonzero */
+  .ovsus {
+    margin: 0 0 14px;
+    font-family: var(--w95);
+    font-size: 12px;
+    color: #7a0000;
+  }
+
+  .ovsus.hide { display: none; }
+
   .again {
     width: 100%;
     padding: 9px 14px;
@@ -626,6 +707,7 @@
 
 <div class="stage" id="stage"></div>
 
+<script src="./js/sentinel.js"></script>
 <script src="./js/chase.js"></script>
 <script src="./js/flappy.js"></script>
 <script src="./js/main.js"></script>

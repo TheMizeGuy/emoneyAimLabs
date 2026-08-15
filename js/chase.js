@@ -41,6 +41,21 @@
        tip the run into a reversible "shame mode"
      - stored best times are salted-checksum signed
 
+   ADVANCED CHEAT DETECTION (V2.7). Same posture, sharper instruments. Only two
+   things in the whole engine void a win -- clock divergence (V2.6 layer 3) and
+   state-checksum divergence (layer C). Everything else taunts and counts:
+     A. fixed 8 ms sub-step physics, so throttling the tab slows the picture and
+        not the game, while the timer stays on the wall clock
+     B. a cursor-presence gate on the winning press, so a click has to arrive
+        where the pointer actually is
+     C. every published number lives in three closures behind one accessor with a
+        rolling checksum; a debugger edit to any copy is a verdict
+     D. geometry attestation twice a second: the button box, the window box and
+        the on-screen transform are re-derived and restored if they moved
+     E. build integrity, delegated to js/sentinel.js (taunt only)
+     G. the WIN console line and the win dialog carry a signature over the run
+     H. every soft detection lands on a visible sus counter
+
    Styles for every class used here live in the one <style> block in index.html.
 */
 (function () {
@@ -61,6 +76,11 @@
   var UNDELAY   = W.clearTimeout.bind(W);
   var LOG = (W.console && W.console.log) ? W.console.log.bind(W.console) : function () {};
   var OBSERVER = W.MutationObserver || W.WebKitMutationObserver || null;
+  // V2.7 layer G leans on these two, so they are captured with the rest
+  var SUBTLE = (W.crypto && W.crypto.subtle && W.crypto.subtle.digest)
+    ? W.crypto.subtle.digest.bind(W.crypto.subtle)
+    : null;
+  var TENC = W.TextEncoder || null;
 
   var DEFAULT_IMAGE    = './assets/emoney.png';
   var DEFAULT_BEST_KEY = 'emoney-aimlabs-best';
@@ -76,6 +96,7 @@
     '<div class="row"><span class="k">MISSES</span><span class="v" data-el="miss">0</span></div>',
     '<div class="row"><span class="k">NEAR</span><span class="v" data-el="near">0</span></div>',
     '<div class="row best hide" data-el="bestRow"><span class="k">BEST</span><span class="v" data-el="best">--</span></div>',
+    '<div class="tray hide" data-el="susRow"><span class="warn" aria-hidden="true"></span>SUS: <span class="v" data-el="sus">0</span></div>',
     '</div>',
     '<div class="sig">',
     '<h1>eMoney Aim Labs</h1>',
@@ -83,9 +104,9 @@
     '</div>',
     '<div class="wrap" data-el="wrap">',
     '<div class="card" data-el="card">',
-    '<div class="cardin">',
-    '<div class="bar">',
-    '<span class="bartitle">eMoney.exe</span>',
+    '<div class="cardin" data-el="cardin">',
+    '<div class="bar" data-el="bar">',
+    '<span class="bartitle" data-el="barTitle">eMoney.exe</span>',
     '<button class="x" data-el="close" type="button" aria-label="Close" tabindex="-1"></button>',
     '</div>',
     '<div class="shot" data-el="shot"></div>',
@@ -104,12 +125,14 @@
     '<div><dt>Near</dt><dd data-el="ovNear">0</dd></div>',
     '<div><dt>Best</dt><dd data-el="ovBest">--</dd></div>',
     '</dl>',
+    '<p class="ovsig">SIG <span class="v" data-el="ovSig">--------</span></p>',
+    '<p class="ovsus hide" data-el="ovSusRow">Sus events logged: <span data-el="ovSus">0</span></p>',
     '<button class="again" data-el="again" type="button">Play again</button>',
     '</div>',
     '<div class="ovbody hide" data-el="ovCheat">',
     '<div class="errrow">',
     '<span class="erricon" aria-hidden="true"></span>',
-    '<p class="errtext">Two clocks, two answers. One of them is lying, and it is not ours.</p>',
+    '<p class="errtext" data-el="cheatText">Two clocks, two answers. One of them is lying, and it is not ours.</p>',
     '</div>',
     '<p class="errsub">No time recorded.</p>',
     '<button class="again" data-el="againCheat" type="button">Play again</button>',
@@ -155,7 +178,9 @@
     var PANIC_SPEED        = 900;
     var BURST_MS           = 1500;
     var BURST_MUL          = 1.6;
-    var DT_MAX             = 0.032;  // s, keeps a backgrounded tab from integrating one giant step
+    // (v1/V2.6 had DT_MAX = 0.032 s here. V2.7 layer A replaced the variable
+    // frame step with a fixed sub-step accumulator, so the per-frame ceiling is
+    // now MAX_SUBSTEPS * FIXED_DT_MS and there is nothing left to clamp.)
     var NEAR_RADIUS        = 48;     // px from the close button's center
     var NEAR_DEBOUNCE      = 250;    // ms
     var EDGE_PAD           = 10;     // keeps a margin between the window and the screen edge
@@ -181,6 +206,35 @@
     var SHAME_MUL          = 1.15; // shame mode: the card gets 15 percent quicker
     var STORE_SALT         = 'aimlab-95';
 
+    /* V2.7 layer A -- fixed-timestep physics.
+       The card integrates in 8 ms sub-steps regardless of frame rate, so
+       throttling the tab lowers the frame rate without lowering the card's
+       speed. The timer never touches this path: it is wall-clock only. */
+    var FIXED_DT_MS   = 8;     // one physics sub-step, in ms
+    var FIXED_DT      = 0.008; // the same sub-step, in seconds
+    var MAX_SUBSTEPS  = 8;     // 64 ms of simulation per frame; the rest is debt
+    var SLIDESHOW_MS  = 120;   // only frames slower than this can accrue debt (<8.3 fps)
+    var PAUSE_MS      = 1500;  // above this it is a pause -- alt-tab, sleep, a breakpoint
+    var LAG_DEBT_MAX  = 2000;  // ms of dropped simulation before it counts as suspicious
+    var LAG_HEAL_MS   = 40;    // a frame at 25 fps or better is a healthy frame...
+    var LAG_HEAL_STEP = 8;     // ...and pays down 8 ms of debt, so hitches never add up
+
+    /* V2.7 layer B -- cursor presence gate on the winning press. */
+    var PRESENCE_MS   = 350;   // a trusted move must be this recent...
+    var PRESENCE_PX   = 150;   // ...and this close to the press point
+    var PRESENCE_SNAP = 2;     // or the press must land on the pointer's own last position
+
+    /* V2.7 layer D -- geometry attestation. */
+    var ATTEST_FRAMES = 30;    // roughly twice a second
+    var GEOM_TOL      = 2;     // px, box sizes and the button's offset in the frame
+    var POS_TOL       = 1;     // px, on-screen transform against the engine's own position
+    var EXP_BTN_W     = 28;    // the caption button, straight out of the stylesheet
+    var EXP_BTN_H     = 26;
+    var BAR_PAD_R     = 4;     // .bar padding-right, which sets the button's inset
+
+    /* V2.7 layer G -- the build salt the win signature is taken over. */
+    var WIN_SALT      = 'aimlab-95-v2.7';
+
     var TAUNTS = [
       'Wrong spot. The X is the small one.',
       'That was the ad, not the button.',
@@ -194,6 +248,14 @@
     var TAUNT_TOOLS  = 'The devtools are not the hard part. The button is.';
     var TAUNT_STORE  = 'Record corrupted. Someone has been editing their trophies.';
     var SHAME_TEXT   = 'Caught you looking under the hood. He is 15 percent faster now. Enjoy.';
+
+    /* V2.7 taunts. Each one is reachable only by doing something a mouse cannot. */
+    var TAUNT_LAG      = 'Slideshow mode does not slow him down. It only slows you down.';
+    var TAUNT_PRESENCE = 'Clicks arrive where the pointer is. Yours did not.';
+    var TAUNT_GEOM     = 'The button is 28 pixels wide. It was 28 pixels wide before you edited it too.';
+    var TAUNT_BUILD    = 'This build has been modified. He noticed.';
+    var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
+    var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
     /* ---------------- listener bookkeeping ---------------- */
     var listeners = [];
@@ -221,6 +283,10 @@
     var hudEl     = el('hud');
     var wrap      = el('wrap');
     var card      = el('card');
+    var cardin    = el('cardin');
+    var barEl     = el('bar');
+    var barTitle  = el('barTitle');
+    var shotEl    = el('shot');
     var btn       = el('close');
     var taunt     = el('taunt');
     var overlay   = el('overlay');
@@ -237,6 +303,12 @@
     var elNear    = el('near');
     var elBest    = el('best');
     var rowBest   = el('bestRow');
+    var rowSus    = el('susRow');
+    var elSus     = el('sus');
+    var elOvSig   = el('ovSig');
+    var rowOvSus  = el('ovSusRow');
+    var elOvSus   = el('ovSus');
+    var cheatText = el('cheatText');
 
     // The window is built around the image at its native size, so it can be
     // sized up front and the layout never shifts when the image lands.
@@ -251,7 +323,7 @@
     img.height = imgH;
     img.style.width = imgW + 'px';
     img.style.height = imgH + 'px';
-    el('shot').appendChild(img);
+    shotEl.appendChild(img);
 
     wrap.style.width = (imgW + FRAME_PX * 2) + 'px';
 
@@ -262,11 +334,20 @@
        projection of these values, never the source of them. */
     var vw = window.innerWidth;
     var vh = window.innerHeight;
-    // Seeded from the known chrome metrics, then replaced by a real measurement.
+
+    /* The window's geometry is arithmetic on the stylesheet, not a measurement:
+       image + two 2px bevels per side, plus the 36px title bar. The close button
+       sits flush right inside that bar. V2.7 layer D makes these the authority
+       and the rendered box the thing under test -- so inflating the button in
+       devtools no longer inflates the hitbox the engine aims at. calibrate()
+       adopts the browser's numbers instead only if it disagrees at boot, which
+       is a rendering environment we do not recognise rather than a cheat. */
     var cardW = imgW + FRAME_PX * 2;
     var cardH = imgH + BAR_H + FRAME_PX * 2;
-    var btnOffX = cardW / 2 - 22;      // close button center, relative to card center
-    var btnOffY = -cardH / 2 + 22;
+    var btnOffX = cardW / 2 - (FRAME_PX + BAR_PAD_R + EXP_BTN_W / 2);
+    var btnOffY = -cardH / 2 + (FRAME_PX + BAR_H / 2);
+    var btnW = EXP_BTN_W, btnH = EXP_BTN_H;
+    var calibrated = false;
 
     var x = vw / 2, y = vh / 2;        // card center
     var vx = 0, vy = 0;
@@ -285,10 +366,28 @@
     var pressLatch = false, pressLatchAt = 0;
 
     var nearInside = false, nearAt = -1e9;
-    var started = false, startT = 0, won = false, finalMs = 0;
-    var misses = 0, nearMisses = 0;
+    var started = false, won = false, finalMs = 0;
     var storeCorrupt = false;
     var bestMs = readBest();
+
+    /* V2.7 layer C. The four numbers a cheat would want to reach are not
+       variables any more; each is three copies in three separate closures behind
+       one accessor, with a per-value MAC and a rolling checksum over every
+       mutation the engine has ever made. Editing one copy in a debugger diverges
+       from the other two, editing all three diverges from the MAC, and either is
+       a verdict rather than a taunt. (The fourth, the flappy score, lives in
+       flappy.js and rides in here as opts.stateCheat.)
+
+       The nonce keys every MAC, so a value lifted out of one session is worthless
+       in the next and two tabs never share a checksum. It must exist before the
+       first newShadow() call, which is why it is declared here and not with the
+       rest of the shadow machinery below. */
+    var shNonce = ((Math.imul(WALL() >>> 0, 1103515245) ^ ((NOW() * 1000) | 0)) >>> 0);
+    var shChain = shNonce;             // rolling checksum over every mutation made
+    var shMisses = newShadow('misses', 0);
+    var shNear   = newShadow('near', 0);
+    var shStartT = newShadow('origin', 0);
+    var stateBad = false, cheatLogged = false;
 
     var lastT = 0, rafId = 0, tauntTimer = 0, winTimer = 0;
     var stopped = false;
@@ -297,7 +396,22 @@
     var startWall = 0, clkDrift = 0, clkLast = null, clkStep = false;
     var clkSum = 0, clkPair = -1, clkStill = 0;
     var tamperAt = -1e9, shame = 1;
-    var mo = null;
+    var mo = null, mo2 = null, geomDirty = false;
+
+    // V2.7 layer A: sub-step accumulator and the lag debt it sheds
+    var accumMs = 0, simT = 0, lagDebtMs = 0, lagFlagged = false, pageHidden = false;
+
+    // V2.7 layer B: the last trusted mouse position, and the press that failed the gate
+    var moveT = -1e9, moveX = 0, moveY = 0, presenceBlockAt = -1e9;
+
+    // V2.7 layer D: how many frames until the next attestation
+    var attestIn = ATTEST_FRAMES;
+
+    // V2.7 layer H: soft detections, seeded with anything flappy already saw
+    var susN = (opts.susSeed > 0) ? Math.floor(opts.susSeed) : 0;
+
+    // V2.7 layer G: the win signature, once it has been computed
+    var winSig = '';
 
     // When the caller passes an audio object it owns the AudioContext, so the
     // chase never constructs a second one; practice passes null and owns nothing,
@@ -338,6 +452,69 @@
       if (!e) return;
       var s = String(v);
       if (e.textContent !== s) e.textContent = s;
+    }
+
+    /* ---- triple-shadow state (V2.7 layer C) ---- */
+
+    function shMac(key, v, seq) {
+      var s = key + '|' + v + '|' + seq + '|' + shNonce;
+      var h = 0x811c9dc5;
+      for (var i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      return h;
+    }
+
+    // One copy, one closure. Three of these back every shadowed value.
+    function shCell(v0) {
+      var v = v0;
+      return { r: function () { return v; }, w: function (n) { v = n; } };
+    }
+
+    function newShadow(key, v0) {
+      var a = shCell(v0), b = shCell(v0), c = shCell(v0);
+      var seq = 0;
+      var mac = shMac(key, v0, 0);
+      return {
+        get: function () {
+          var va = a.r();
+          if (stateBad) return va;
+          if (va !== b.r() || va !== c.r() || shMac(key, va, seq) !== mac) onStateDivergence();
+          return va;
+        },
+        set: function (n) {
+          seq++;
+          a.w(n); b.w(n); c.w(n);
+          mac = shMac(key, n, seq);
+          shChain = (Math.imul(shChain, 33) ^ mac) >>> 0;
+        }
+      };
+    }
+
+    // Hard evidence, so this is one of only two paths that voids a win. win()
+    // owns the console line: it recomputes the verdict from stateBad and logs it
+    // exactly once, whether the divergence surfaced here or inside win's own reads.
+    function onStateDivergence() {
+      if (stateBad) return;
+      stateBad = true;
+      playError();
+      if (!won) win();
+      else logCheat('state');
+    }
+
+    /* ---- the sus meter (V2.7 layer H) ----
+       Every soft detection ends here. It counts and it shows; it never locks. */
+    function sus(reason) {
+      susN++;
+      renderSus();
+      LOG('[AIMLAB] SUS n=' + susN + ' reason=' + reason);
+    }
+
+    function renderSus() {
+      if (susN <= 0) return;
+      setText(elSus, susN);
+      rowSus.classList.remove('hide');
     }
 
     /* ---- signed storage (V2.6 layer 6) ---- */
@@ -400,34 +577,46 @@
     function startTimer() {
       if (started || won) return;
       started = true;
-      startT = NOW();
+      shStartT.set(NOW());
       startWall = WALL();
+      simT = NOW();
       LOG('[AIMLAB] START');
     }
 
-    function addMiss() {
-      misses++;
-      setText(elMiss, misses);
-      LOG('[AIMLAB] MISS n=' + misses);
+    function addMiss(reason) {
+      var n = shMisses.get() + 1;
+      shMisses.set(n);
+      setText(elMiss, n);
+      LOG('[AIMLAB] MISS n=' + n + (reason ? (' reason=' + reason) : ''));
       playError();
+    }
+
+    // V2.7 layer C keeps the near-miss counter behind the accessor as well; step()
+    // calls this instead of touching the number, which also keeps the physics
+    // function's free-variable surface small enough to drive from a Node harness.
+    function bumpNear() {
+      var n = shNear.get() + 1;
+      shNear.set(n);
+      setText(elNear, n);
     }
 
     /* ---------------- anti-cheat ---------------- */
 
-    // Every detection ends here: a taunt and a noise, never a lock.
-    function onTamper(text) {
+    // Every detection ends here: a taunt, a noise and a sus point, never a lock.
+    function onTamper(text, reason) {
       var t = NOW();
       if (t - tamperAt < TAMPER_DEBOUNCE_MS) return;
       tamperAt = t;
       showTaunt(text);
       playError();
+      sus(reason);
     }
 
     // Two independent clocks and a rolling checksum over the pair. Backgrounding
     // a tab moves both together, so only a doctored clock separates them.
     function clockTick() {
       if (!started || won) return;
-      var p = NOW() - startT;
+      var p = NOW() - shStartT.get();
       var w = WALL() - startWall;
       var d = p - w;
       var ad = d < 0 ? -d : d;
@@ -460,17 +649,21 @@
     // from closure state; our own writes are already equal, so this never loops.
     function reproject() {
       var fixed = 0;
-      fixed += reassert(elMiss, misses);
-      fixed += reassert(elNear, nearMisses);
+      var m = shMisses.get(), nm = shNear.get();
+      fixed += reassert(elMiss, m);
+      fixed += reassert(elNear, nm);
+      if (susN > 0) fixed += reassert(elSus, susN);
       if (bestMs !== null) fixed += reassert(elBest, fmt(bestMs));
       if (won) {
         fixed += reassert(elTime, fmt(finalMs));
         fixed += reassert(el('ovTime'), fmt(finalMs));
-        fixed += reassert(el('ovMiss'), misses);
-        fixed += reassert(el('ovNear'), nearMisses);
+        fixed += reassert(el('ovMiss'), m);
+        fixed += reassert(el('ovNear'), nm);
         fixed += reassert(el('ovBest'), bestMs === null ? '--' : fmt(bestMs));
+        if (winSig) fixed += reassert(elOvSig, winSig.slice(0, 8));
+        if (susN > 0) fixed += reassert(elOvSus, susN);
       }
-      if (fixed > 0) onTamper(TAUNT_TAMPER);
+      if (fixed > 0) onTamper(TAUNT_TAMPER, 'hud-edit');
     }
 
     function reassert(node, v) {
@@ -486,6 +679,141 @@
       mo = new OBSERVER(reproject);
       mo.observe(hudEl, { childList: true, subtree: true, characterData: true });
       mo.observe(overlay, { childList: true, subtree: true, characterData: true });
+
+      /* V2.7 layer D. Kept on a second observer with its own callback because the
+         first one fires every frame -- the timer rewrites a text node 60 times a
+         second -- and a getBoundingClientRect on that schedule is a layout thrash
+         nobody needs. Nothing here is written by the engine during play, so this
+         one only fires when somebody else edits the DOM. .wrap is watched for
+         children but never for attributes: its transform is ours, every frame. */
+      var attrs = { attributes: true, attributeFilter: ['style', 'class'] };
+      mo2 = new OBSERVER(function () { geomDirty = true; });
+      mo2.observe(card, attrs);
+      mo2.observe(cardin, attrs);
+      mo2.observe(barEl, attrs);
+      mo2.observe(btn, attrs);
+      mo2.observe(hudEl, attrs);
+      mo2.observe(overlay, attrs);
+      mo2.observe(root, { childList: true });
+      mo2.observe(wrap, { childList: true });
+      mo2.observe(card, { childList: true, subtree: true });
+    }
+
+    /* ---- geometry attestation (V2.7 layer D) ---- */
+
+    // Run once, when the chrome has first laid out. The stylesheet and the
+    // arithmetic in the state block should agree to the pixel; if this browser
+    // lays the window out differently, take its numbers instead and attest
+    // against those. An unfamiliar renderer is not a cheat.
+    function calibrate() {
+      if (calibrated || won || stopped) return;
+      var cr = card.getBoundingClientRect();
+      var br = btn.getBoundingClientRect();
+      if (!(cr.width > 0 && cr.height > 0 && br.width > 0 && br.height > 0)) return;
+      calibrated = true;
+      if (Math.abs(cr.width - cardW) > GEOM_TOL || Math.abs(cr.height - cardH) > GEOM_TOL ||
+          Math.abs(br.width - btnW) > GEOM_TOL || Math.abs(br.height - btnH) > GEOM_TOL) {
+        cardW = cr.width;
+        cardH = cr.height;
+        btnW = br.width;
+        btnH = br.height;
+        btnOffX = (br.left + br.width / 2) - (cr.left + cr.width / 2);
+        btnOffY = (br.top + br.height / 2) - (cr.top + cr.height / 2);
+        wrap.style.width = cardW + 'px';
+        clampIntoView();
+        render();
+      }
+    }
+
+    function attest() {
+      if (won || stopped || !calibrated) return;
+      var br = btn.getBoundingClientRect();
+      var cr = card.getBoundingClientRect();
+      var bad = '';
+
+      if (!(br.width > 0 && br.height > 0) || !(cr.width > 0 && cr.height > 0)) {
+        bad = 'hidden';
+      } else if (Math.abs(br.width - btnW) > GEOM_TOL || Math.abs(br.height - btnH) > GEOM_TOL) {
+        bad = 'button';
+      } else if (Math.abs(cr.width - cardW) > GEOM_TOL || Math.abs(cr.height - cardH) > GEOM_TOL) {
+        bad = 'window';
+      } else {
+        var ox = (br.left + br.width / 2) - (cr.left + cr.width / 2);
+        var oy = (br.top + br.height / 2) - (cr.top + cr.height / 2);
+        if (Math.abs(ox - btnOffX) > GEOM_TOL || Math.abs(oy - btnOffY) > GEOM_TOL) {
+          bad = 'offset';
+        } else if (Math.abs((cr.left + cr.width / 2) - x) > POS_TOL ||
+                   Math.abs((cr.top + cr.height / 2) - y) > POS_TOL) {
+          // what is on screen against what the engine believes it drew
+          bad = 'transform';
+        }
+      }
+
+      if (!bad) return;
+      restoreChrome();
+      sus('geometry-' + bad);
+      showTaunt(TAUNT_GEOM);
+    }
+
+    function stamp(node, props) {
+      if (!node) return;
+      for (var i = 0; i < props.length; i += 2) {
+        try { node.style.setProperty(props[i], props[i + 1], 'important'); } catch (e) { /* ignore */ }
+      }
+    }
+
+    // Inline !important outranks any author rule, so this survives an edited
+    // stylesheet as well as an edited element. Nothing is stamped until something
+    // has actually moved, so a clean run never carries a byte of inline style.
+    function restoreChrome() {
+      stamp(wrap, ['width', cardW + 'px', 'display', 'block', 'visibility', 'visible',
+                   'opacity', '1', 'position', 'fixed', 'left', '0px', 'top', '0px',
+                   'z-index', '20', 'pointer-events', 'auto']);
+      stamp(card, ['width', '100%', 'box-sizing', 'border-box', 'transform', 'none',
+                   'padding', '0px', 'border-width', '2px', 'display', 'block',
+                   'visibility', 'visible', 'opacity', '1', 'position', 'relative',
+                   'pointer-events', 'auto']);
+      stamp(cardin, ['padding', '0px', 'border-width', '2px', 'display', 'block',
+                     'visibility', 'visible', 'opacity', '1']);
+      stamp(barEl, ['height', BAR_H + 'px', 'padding', '0px ' + BAR_PAD_R + 'px 0px 6px',
+                    'display', 'flex', 'align-items', 'center', 'box-sizing', 'border-box',
+                    'visibility', 'visible', 'opacity', '1']);
+      stamp(btn, ['width', btnW + 'px', 'height', btnH + 'px',
+                  'min-width', btnW + 'px', 'min-height', btnH + 'px',
+                  'max-width', btnW + 'px', 'max-height', btnH + 'px',
+                  'box-sizing', 'border-box', 'padding', '0px', 'margin', '0px',
+                  'border-width', '2px', 'flex', 'none', 'position', 'relative',
+                  'transform', 'none', 'display', 'block', 'visibility', 'visible',
+                  'opacity', '1', 'pointer-events', 'auto']);
+      render();
+    }
+
+    function ensure(parent, child, before) {
+      if (!parent || !child || child.parentNode === parent) return 0;
+      if (before && before.parentNode === parent) parent.insertBefore(child, before);
+      else parent.appendChild(child);
+      return 1;
+    }
+
+    // Deleting the close button in the elements panel is a fair thing to try. It
+    // comes back with its listeners intact, because the engine never let go of
+    // the node -- only the document did.
+    function checkStructure() {
+      if (won || stopped) return;
+      var n = 0;
+      n += ensure(root, wrap, null);
+      n += ensure(wrap, card, taunt);
+      n += ensure(card, cardin, null);
+      n += ensure(cardin, barEl, shotEl);
+      n += ensure(cardin, shotEl, null);
+      n += ensure(barEl, btn, null);
+      n += ensure(barEl, barTitle, btn);
+      n += ensure(hudEl, rowSus, null);
+      n += ensure(rowSus, elSus, null);
+      if (n === 0) return;
+      restoreChrome();
+      sus('structure');
+      showTaunt(TAUNT_GEOM);
     }
 
     // Reversible, and it never stops play: the card just gets ruder.
@@ -629,17 +957,11 @@
       if (won) return;
       vw = window.innerWidth;
       vh = window.innerHeight;
-
-      var cr = card.getBoundingClientRect();
-      if (cr.width > 0 && cr.height > 0) {
-        cardW = cr.width;
-        cardH = cr.height;
-        var br = btn.getBoundingClientRect();
-        if (br.width > 0) {
-          btnOffX = (br.left + br.width / 2) - (cr.left + cr.width / 2);
-          btnOffY = (br.top + br.height / 2) - (cr.top + cr.height / 2);
-        }
-      }
+      // The window's own dimensions do not depend on the viewport, so a resize
+      // re-clamps and nothing more. Adopting a fresh measurement on every resize
+      // was V2.6's behaviour and was also a way to hand the engine an inflated
+      // hitbox; calibrate() now takes exactly one reading, at boot.
+      calibrate();
       clampIntoView();
       render();
     }
@@ -685,7 +1007,12 @@
 
     on(window, 'pointermove', function (e) {
       startTimer();
-      setPointer(e.clientX, e.clientY, NOW());
+      var t = NOW();
+      setPointer(e.clientX, e.clientY, t);
+      // V2.7 layer B: only a trusted move is evidence that a pointer is really
+      // there. Dispatched moves still push the physics around, as they always
+      // did, but they cannot vouch for a press.
+      if (e.isTrusted) { moveT = t; moveX = e.clientX; moveY = e.clientY; }
     }, { passive: true });
 
     on(window, 'pointerdown', function (e) {
@@ -724,10 +1051,35 @@
     on(btn, 'pointerdown', function (e) {
       if (won || !e.isTrusted) return;
       startTimer();
+
+      // V2.7 layer B. A mouse cannot press where it is not: the browser streams a
+      // pointermove to every position the cursor passes through, so the last
+      // trusted move is always at the press point. Touch and pen are exempt -- a
+      // tap legitimately arrives with nothing in front of it.
+      if (e.pointerType === 'mouse' && !presenceOK(e.clientX, e.clientY)) {
+        presenceBlockAt = NOW();
+        addMiss('presence');
+        sus('presence');
+        showTaunt(TAUNT_PRESENCE);
+        return;                    // no latch either: the window keeps running
+      }
+
       pressLatch = true;
       pressLatchAt = NOW();
       try { btn.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported */ }
     });
+
+    // Passes when a trusted move is both recent and nearby, or when the press
+    // lands on the pointer's own last known position -- which is what a player
+    // who parks the cursor and waits for the window to come to them produces,
+    // and what an injected press at an arbitrary coordinate never does.
+    function presenceOK(cx, cy) {
+      if (moveT <= -1e8) return false;          // no trusted mouse movement at all yet
+      var dx = cx - moveX, dy = cy - moveY;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist <= PRESENCE_SNAP) return true;
+      return (NOW() - moveT) <= PRESENCE_MS && dist <= PRESENCE_PX;
+    }
 
     function releaseLatch() { pressLatch = false; }
     on(window, 'pointerup', releaseLatch, true);
@@ -747,19 +1099,24 @@
     on(window, 'keydown', function (e) {
       if (won || !isToolsKey(e)) return;
       e.preventDefault();
-      onTamper(TAUNT_TOOLS);
+      onTamper(TAUNT_TOOLS, 'devtools-key');
       enterShame();
     }, true);
 
     on(root, 'contextmenu', function (e) {
       if (won) return;
       e.preventDefault();
-      onTamper(TAUNT_TOOLS);
+      onTamper(TAUNT_TOOLS, 'contextmenu');
     });
 
     on(window, 'click', function (e) {
       if (won) return;
       startTimer();
+
+      // A press that failed the presence gate already counted as a miss. Whatever
+      // click it produces, and wherever that click retargets to, must not count
+      // a second time.
+      if (NOW() - presenceBlockAt < 1000) { presenceBlockAt = -1e9; return; }
 
       var onX = (e.target === btn) || btn.contains(e.target);
       if (onX) {
@@ -934,9 +1291,8 @@
         var ndx = px - bx, ndy = py - by;
         var inZone = (ndx * ndx + ndy * ndy) <= NEAR_RADIUS * NEAR_RADIUS;
         if (inZone && !nearInside && (now - nearAt) >= NEAR_DEBOUNCE) {
-          nearMisses++;
           nearAt = now;
-          setText(elNear, nearMisses);
+          bumpNear();
         }
         nearInside = inZone;
       } else {
@@ -944,47 +1300,168 @@
       }
     }
 
+    /* V2.7 layer A -- fixed-timestep integration.
+
+       The card advances in 8 ms sub-steps whatever the frame rate is, so a
+       throttled tab renders a slideshow of a game running at its normal speed
+       rather than a game running in slow motion. Eight sub-steps is the ceiling
+       for one frame; simulation past that is dropped on the floor, and dropped
+       simulation is exactly what a CPU-throttle cheat produces in bulk.
+
+       Two guards keep the debt honest. Frames slower than PAUSE_MS are a pause,
+       not a slideshow -- alt-tab, a sleeping laptop, a breakpoint -- and cost
+       nothing. Frames faster than SLIDESHOW_MS are ordinary jank and also cost
+       nothing; below 8.3 fps is where the ceiling starts billing. Reaching
+       LAG_DEBT_MAX therefore takes sustained single-digit frame rates, which no
+       machine that can render this page produces by accident.
+
+       Returns the number of sub-steps actually taken. */
+    function integrate(dtMs, t) {
+      if (!(dtMs > 0)) dtMs = 1000 / 60;
+
+      if (dtMs > PAUSE_MS || pageHidden) {
+        accumMs = 0;                    // a pause is not lag; resync and move on
+        simT = t;
+        return 0;
+      }
+
+      accumMs += dtMs;
+      var n = 0;
+      while (accumMs >= FIXED_DT_MS && n < MAX_SUBSTEPS) {
+        accumMs -= FIXED_DT_MS;
+        simT += FIXED_DT_MS;
+        step(FIXED_DT, simT);
+        n++;
+      }
+
+      if (accumMs >= FIXED_DT_MS) {
+        var dropped = accumMs - (accumMs % FIXED_DT_MS);
+        accumMs -= dropped;
+        simT += dropped;                // the clock moved on without the physics
+        if (dtMs > SLIDESHOW_MS) lagDebtMs += dropped;
+      }
+
+      // Debt is only interesting when it is sustained. A machine that stutters
+      // and recovers pays its debt back at 8 ms per healthy frame -- about half a
+      // second of credit for every second at 60 fps -- so nothing short of a tab
+      // that never recovers can reach the ceiling.
+      if (dtMs <= LAG_HEAL_MS && lagDebtMs > 0) {
+        lagDebtMs -= LAG_HEAL_STEP;
+        if (lagDebtMs < 0) lagDebtMs = 0;
+      }
+      return n;
+    }
+
     function frame(t) {
       if (stopped) return;
       rafId = RAF(frame);
 
-      var dt = (t - lastT) / 1000;
+      var dtMs = t - lastT;
       lastT = t;
-      if (!(dt > 0)) dt = 1 / 60;
-      if (dt > DT_MAX) dt = DT_MAX;
 
-      step(dt, t);
+      integrate(dtMs, t);
       render();
       clockTick();
 
-      if (started) setText(elTime, fmt(t - startT));
+      if (lagDebtMs > LAG_DEBT_MAX && !lagFlagged) {
+        lagFlagged = true;
+        sus('lag-debt');
+        showTaunt(TAUNT_LAG);
+      }
+
+      // Layer D samples between sub-step batches: the transform on screen is the
+      // one this frame just drew, so it can be compared against the position the
+      // engine integrated to.
+      if (geomDirty) { geomDirty = false; checkStructure(); attest(); }
+      if (--attestIn <= 0) { attestIn = ATTEST_FRAMES; checkStructure(); attest(); }
+
+      if (started) setText(elTime, fmt(t - shStartT.get()));
     }
 
     /* ---------------- win ---------------- */
+
+    /* ---- the win signature (V2.7 layer G) ----
+       SHA-256 where the browser offers it, a doubled FNV-1a where it does not.
+       Either way the console line ends in 16 hex characters that only this build,
+       with these three numbers, produces -- so a WIN line pasted into a chat is
+       checkable, and a hand-typed one is not. */
+    function signWin(ms, m, nm, cb) {
+      var msg = ms + '|' + m + '|' + nm + '|' + WIN_SALT;
+      if (SUBTLE && TENC) {
+        var p = null;
+        try { p = SUBTLE('SHA-256', new TENC().encode(msg)); } catch (e) { p = null; }
+        if (p && p.then) {
+          p.then(function (buf) { cb(hex16(buf)); }, function () { cb(fnv16(msg)); });
+          return;
+        }
+      }
+      cb(fnv16(msg));
+    }
+
+    function hex16(buf) {
+      var b = new Uint8Array(buf), out = '';
+      for (var i = 0; i < 8 && i < b.length; i++) out += pad(b[i].toString(16), 2);
+      return out;
+    }
+
+    function fnv16(s) {
+      var h1 = 0x811c9dc5, h2 = 0x9e3779b9;
+      for (var i = 0; i < s.length; i++) {
+        h1 = Math.imul(h1 ^ s.charCodeAt(i), 0x01000193) >>> 0;
+        h2 = Math.imul(h2 ^ s.charCodeAt(s.length - 1 - i), 0x85ebca6b) >>> 0;
+      }
+      return pad(h1.toString(16), 8) + pad(h2.toString(16), 8);
+    }
+
+    function logCheat(kind) {
+      if (cheatLogged) return;
+      cheatLogged = true;
+      LOG('[AIMLAB] CHEAT kind=' + kind);
+    }
 
     function win() {
       if (won) return;
       if (!started) startTimer();
       won = true;
-      // every published number is read straight out of the closure (V2.6 layer 7)
-      finalMs = Math.round(NOW() - startT);
+      // every published number is read straight out of the closure (V2.6 layer 7),
+      // and since V2.7 out of the accessor that guards three copies of it
+      finalMs = Math.round(NOW() - shStartT.get());
+      var m = shMisses.get();
+      var nm = shNear.get();
 
       CAF(rafId);
       pressLatch = false;
       UNDELAY(tauntTimer);
       taunt.classList.remove('on');
+      // drop any transform layer D stamped, or the pop-out keyframes lose to it
+      card.style.removeProperty('transform');
       card.classList.add('gone');
       stopAudio();
 
-      var cheated = clockIsSuspect();
+      // The only two things that void a run: three copies of a number that no
+      // longer agree (here or in flappy), and two clocks that no longer agree.
+      var kind = (stateBad || opts.stateCheat === true) ? 'state'
+               : (clockIsSuspect() ? 'clock' : '');
+      var cheated = !!kind;
 
       if (cheated) {
-        LOG('[AIMLAB] CHEAT kind=clock');
+        logCheat(kind);
         playError();
       } else {
-        LOG('[AIMLAB] WIN time_ms=' + finalMs +
-            ' misses=' + misses +
-            ' near_misses=' + nearMisses);
+        // Layer G signs asynchronously. The overlay is on a 300 ms delay and a
+        // digest of a 40-character string resolves in well under that, so the
+        // dialog has never yet rendered before its signature; the console line is
+        // emitted from the same callback and so may trail the other lines of the
+        // run by a tick.
+        signWin(finalMs, m, nm, function (sig) {
+          winSig = sig;
+          setText(elOvSig, sig.slice(0, 8));
+          LOG('[AIMLAB] WIN time_ms=' + finalMs +
+              ' misses=' + m +
+              ' near_misses=' + nm +
+              ' sus=' + susN +
+              ' sig=' + sig);
+        });
       }
 
       setText(elTime, fmt(finalMs));
@@ -1000,13 +1477,20 @@
       showBest();
 
       setText(el('ovTime'), fmt(finalMs));
-      setText(el('ovMiss'), misses);
-      setText(el('ovNear'), nearMisses);
+      setText(el('ovMiss'), m);
+      setText(el('ovNear'), nm);
       setText(el('ovBest'), bestMs === null ? '--' : fmt(bestMs));
       setText(el('ovNote'), isBest ? 'New best time.' : (RECORD_BEST ? '' : 'Seam run. Not recorded.'));
 
+      // V2.7 layer H: the count is on the dialog only when there is one to show
+      if (susN > 0) {
+        setText(elOvSus, susN);
+        rowOvSus.classList.remove('hide');
+      }
+
       if (cheated) {
         setText(ovTitle, 'eMoney.exe - Cheat detected');
+        setText(cheatText, (kind === 'state') ? CHEAT_TEXT_STATE : CHEAT_TEXT_CLOCK);
         ovWin.classList.add('hide');
         ovCheat.classList.remove('hide');
       }
@@ -1021,12 +1505,15 @@
         try {
           opts.onWin({
             timeMs: finalMs,
-            misses: misses,
-            nearMisses: nearMisses,
+            misses: m,
+            nearMisses: nm,
             bestMs: bestMs,
             isBest: isBest,
             cheated: cheated,
-            clockSum: clkSum
+            cheatKind: kind,
+            sus: susN,
+            clockSum: clkSum,
+            stateSum: shChain
           });
         } catch (e) { /* a caller's handler must not break the engine */ }
       }
@@ -1043,6 +1530,7 @@
       stopAudio();
       killErrorVoices();
       if (mo) { mo.disconnect(); mo = null; }
+      if (mo2) { mo2.disconnect(); mo2 = null; }
       if (ownCtx) {
         try { ownCtx.close(); } catch (e) { /* already closed */ }
         ownCtx = null;
@@ -1054,21 +1542,54 @@
     /* ---------------- boot ---------------- */
 
     showBest();
+    renderSus();                 // only visible if flappy already saw something
     measure();
     on(window, 'load', measure);
     on(img, 'load', measure);
     watchDom();
 
+    // V2.7 layer A: a hidden tab is paused, not throttled, so it never bills debt.
+    on(document, 'visibilitychange', function () {
+      pageHidden = !!document.hidden;
+      if (!pageHidden) accumMs = 0;
+    });
+    pageHidden = !!document.hidden;
+
     if (storeCorrupt) DELAY(function () { showTaunt(TAUNT_STORE); }, 600);
+
+    // V2.7 layer E: taunt only, never a verdict. A modified build is the one
+    // finding this engine is not allowed to be sure about.
+    if (W.AimlabSentinel && typeof W.AimlabSentinel.check === 'function') {
+      W.AimlabSentinel.check(function (verdict) {
+        if (verdict !== 'modified' || stopped || won) return;
+        sus('build');
+        showTaunt(TAUNT_BUILD);
+      });
+    }
 
     tryStartAudio();
 
     lastT = NOW();
+    simT = lastT;
     rafId = RAF(frame);
 
     return Object.freeze({ stop: stop, setAudio: setAudio });
   }
 
-  // frozen so the module itself cannot be swapped out from the console
-  W.AimlabChase = Object.freeze({ start: start });
+  // Frozen so the module cannot be edited from the console, and defined as a
+  // non-writable property so it cannot be REPLACED either -- Object.freeze alone
+  // protects the object, not the binding that points at it, and
+  // `window.AimlabChase = {...}` from a sloppy-mode console would otherwise just
+  // work. Assignment now fails silently there and throws in strict mode.
+  publish(W, 'AimlabChase', Object.freeze({ start: start }));
+
+  function publish(host, name, value) {
+    try {
+      Object.defineProperty(host, name, {
+        value: value, writable: false, configurable: false, enumerable: true
+      });
+    } catch (e) {
+      host[name] = value;      // an environment that will not take the descriptor
+    }
+  }
 })();

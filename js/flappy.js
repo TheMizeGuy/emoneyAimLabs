@@ -15,9 +15,27 @@
  *   [AIMLAB] FLAPPY SCORE n=<int>
  *   [AIMLAB] FLAPPY DEATH score=<int>
  *   [AIMLAB] FLAPPY DONE
+ *
+ * V2.7 anti-cheat, this module's share of it:
+ *   C. the score is three copies in three closures behind one accessor with a
+ *      rolling checksum, cross-checked against the physics counter every step.
+ *      A divergence taints the run and the chase that follows opens with the
+ *      CHEAT DETECTED dialog instead of a timer.
+ *   F. inter-flap intervals are collected per run; twenty of them inside a two
+ *      percent coefficient of variation is a metronome, not a person. Costs a
+ *      sus point and a line of text, never a life.
+ * Both counts ride to the chase engine through onComplete(info).
  */
 (function () {
   'use strict';
+
+  /* Captured at parse time, same doctrine as the chase engine: patching
+     console.log or performance.now later reaches nothing this file holds. */
+  var WF = window;
+  var LOGF = (WF.console && WF.console.log) ? WF.console.log.bind(WF.console) : function () {};
+  var NOWF = (WF.performance && WF.performance.now)
+    ? WF.performance.now.bind(WF.performance)
+    : Date.now.bind(Date);
 
   /* ---- PHYSICS CORE START ----
    * Everything between these markers is pure logic with no DOM dependency, so
@@ -165,6 +183,53 @@
   var VICTORY_BEAT = 0.6;            /* seconds frozen before onComplete fires */
 
   var sessionBest = 0;               /* best across runs in this page session */
+
+  var CADENCE_MIN_INTERVALS = 20;    /* V2.7 layer F: intervals needed before judging */
+  var CADENCE_CV = 0.02;             /* below this a human is not driving */
+  var NOTE_SECONDS = 3;              /* how long a detection stays on the canvas */
+
+  /* ---- triple-shadow score (V2.7 layer C) ----
+   * Three copies in three closures, a MAC per value keyed on a per-run nonce,
+   * and a rolling checksum over every mutation. world.score stays the physics
+   * counter; the two are compared on every scoring step, so editing either the
+   * shadow or the counter shows up as a disagreement.
+   */
+  var shNonce = ((Math.imul(Date.now() >>> 0, 2246822519) ^ 0x9e3779b9) >>> 0);
+  var shChain = shNonce;
+
+  function shMac(key, v, seq) {
+    var s = key + '|' + v + '|' + seq + '|' + shNonce;
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h;
+  }
+
+  function shCell(v0) {
+    var v = v0;
+    return { r: function () { return v; }, w: function (n) { v = n; } };
+  }
+
+  function newShadow(key, v0, onDiverge) {
+    var a = shCell(v0), b = shCell(v0), c = shCell(v0);
+    var seq = 0;
+    var mac = shMac(key, v0, 0);
+    return {
+      get: function () {
+        var va = a.r();
+        if (va !== b.r() || va !== c.r() || shMac(key, va, seq) !== mac) { onDiverge(); }
+        return va;
+      },
+      set: function (n) {
+        seq++;
+        a.w(n); b.w(n); c.w(n);
+        mac = shMac(key, n, seq);
+        shChain = (Math.imul(shChain, 33) ^ mac) >>> 0;
+      }
+    };
+  }
 
   /* Deterministic decor so the skyline is stable between runs. */
   function decorRand(seed) {
@@ -480,7 +545,7 @@
       if (typeof console !== 'undefined' && console.warn) {
         console.warn('[AIMLAB] FLAPPY start called without a container element');
       }
-      return { stop: function () {} };
+      return Object.freeze({ stop: function () {} });
     }
 
     var targetScore = typeof opts.targetScore === 'number' && opts.targetScore > 0
@@ -541,8 +606,54 @@
     var lastTs = 0;
     var ro = null;
 
-    function log(msg) {
-      if (typeof console !== 'undefined' && console.log) { console.log(msg); }
+    /* V2.7 layers C and F. susN and tainted are per session and ride to the
+     * chase engine; flaps and cadenceFlagged reset with every run, so the
+     * metronome verdict fires at most once per run. */
+    var shScore = newShadow('score', 0, onDiverge);
+    var tainted = false;
+    var susN = 0;
+    var flaps = [];
+    var cadenceFlagged = false;
+    var noteText = '';
+    var noteUntil = -1;
+
+    function log(msg) { LOGF(msg); }
+
+    function note(text) {
+      noteText = text;
+      noteUntil = clock + NOTE_SECONDS;
+    }
+
+    /* The score disagreeing with itself is hard evidence, so unlike everything
+     * else in this file it is not a sus point -- it voids the run that follows. */
+    function onDiverge() {
+      if (tainted) { return; }
+      tainted = true;
+      log('[AIMLAB] CHEAT kind=state');
+      note('SCORE STATE MISMATCH');
+    }
+
+    /* A person cannot hold twenty taps to a two percent coefficient of variation
+     * and a timer cannot help doing it, so the threshold sits in a gap nobody
+     * playing by hand can reach. It never blocks, resets or costs a life. */
+    function cadenceCheck() {
+      if (cadenceFlagged) { return; }
+      var n = flaps.length - 1;
+      if (n < CADENCE_MIN_INTERVALS) { return; }
+      var i, d, sum = 0;
+      for (i = 0; i < n; i++) { sum += flaps[i + 1] - flaps[i]; }
+      var mean = sum / n;
+      if (!(mean > 0)) { return; }
+      var vsum = 0;
+      for (i = 0; i < n; i++) {
+        d = (flaps[i + 1] - flaps[i]) - mean;
+        vsum += d * d;
+      }
+      if (Math.sqrt(vsum / n) / mean >= CADENCE_CV) { return; }
+      cadenceFlagged = true;
+      susN++;
+      log('[AIMLAB] SUS n=' + susN + ' reason=cadence');
+      note('METRONOME DETECTED');
     }
 
     function setState(next) {
@@ -576,6 +687,9 @@
 
     function resetRun() {
       world = makeWorld(Math.random);
+      shScore = newShadow('score', 0, onDiverge);
+      flaps = [];
+      cadenceFlagged = false;
       view.tilt = 0;
       view.tiltHold = 0;
       view.flash = 0;
@@ -596,6 +710,10 @@
         view.tilt = -0.42;
         view.tiltHold = 0.13;
         view.wing = 0;
+        if (state === 'playing') {
+          flaps.push(NOWF());
+          cadenceCheck();
+        }
       }
     }
 
@@ -663,21 +781,26 @@
 
         var n = world.scoredThisStep;
         while (n > 0) {
-          log('[AIMLAB] FLAPPY SCORE n=' + (world.score - n + 1));
+          shScore.set(shScore.get() + 1);
+          log('[AIMLAB] FLAPPY SCORE n=' + shScore.get());
           n--;
         }
+        /* The shadow is what the game plays by; the physics counter is only its
+         * witness. Editing world.score to skip ahead therefore does not skip
+         * ahead, it just gets noticed. */
+        if (shScore.get() !== world.score) { onDiverge(); }
 
-        if (world.score >= targetScore) {
+        if (shScore.get() >= targetScore) {
           log('[AIMLAB] FLAPPY DONE');
-          if (world.score > sessionBest) { sessionBest = world.score; }
+          if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }
           view.flash = 1;
           setState('complete');
           return;
         }
 
         if (world.diedThisStep) {
-          log('[AIMLAB] FLAPPY DEATH score=' + world.score);
-          if (world.score > sessionBest) { sessionBest = world.score; }
+          log('[AIMLAB] FLAPPY DEATH score=' + shScore.get());
+          if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }
           view.flash = 1;
           setState('dead');
         }
@@ -702,7 +825,10 @@
 
       if (state === 'complete' && !completeFired && clock - stateAt >= VICTORY_BEAT) {
         completeFired = true;
-        if (onComplete) { onComplete(); }
+        /* The handoff is unchanged -- same trigger, same moment, same call. The
+         * argument is additive: main.js forwards it to the chase engine so the
+         * sus counter and any state verdict survive the transition. */
+        if (onComplete) { onComplete({ sus: susN, stateCheat: tainted }); }
       }
     }
 
@@ -724,9 +850,15 @@
       drawBird(ctx, BIRD_X, world.y, view.tilt, view.wing);
 
       if (state === 'playing' || state === 'complete') {
-        label(ctx, String(world.score), W / 2, 58, 42, '#ffffff', 5, '#10151f');
-        label(ctx, world.score + ' / ' + targetScore, W / 2, 90, 12,
+        label(ctx, String(shScore.get()), W / 2, 58, 42, '#ffffff', 5, '#10151f');
+        label(ctx, shScore.get() + ' / ' + targetScore, W / 2, 90, 12,
           'rgba(236, 244, 255, 0.82)', 3, 'rgba(12, 17, 26, 0.85)');
+      }
+
+      /* V2.7: the only thing anti-cheat draws on this screen, and only after
+       * something has actually been detected. */
+      if (noteText && clock < noteUntil) {
+        label(ctx, noteText, W / 2, 116, 12, '#ffd166', 3, 'rgba(12, 17, 26, 0.9)');
       }
 
       if (state === 'getready') {
@@ -748,7 +880,7 @@
         drawCard(ctx, 44, 168, 200, 146);
         label(ctx, 'GAME OVER', W / 2, 200, 22, '#f26d4e', 4, '#10151f');
         label(ctx, 'SCORE', 92, 236, 12, 'rgba(214, 228, 242, 0.7)', 0, '', 'left');
-        label(ctx, String(world.score), 196, 236, 16, '#ffffff', 0, '', 'right');
+        label(ctx, String(shScore.get()), 196, 236, 16, '#ffffff', 0, '', 'right');
         label(ctx, 'BEST', 92, 258, 12, 'rgba(214, 228, 242, 0.7)', 0, '', 'left');
         label(ctx, String(sessionBest), 196, 258, 16, '#f2c14e', 0, '', 'right');
         label(ctx, 'TARGET  ' + targetScore + '  IN ONE RUN', W / 2, 280, 10,
@@ -764,7 +896,7 @@
         drawVignette(ctx, 0.5);
         drawCard(ctx, 34, 196, 220, 96);
         label(ctx, 'SIMULATION READY', W / 2, 228, 19, '#6fe3a5', 4, '#10151f');
-        label(ctx, 'TARGET REACHED  -  ' + world.score + ' / ' + targetScore,
+        label(ctx, 'TARGET REACHED  -  ' + shScore.get() + ' / ' + targetScore,
           W / 2, 258, 11, 'rgba(214, 228, 242, 0.82)', 0, '');
       }
 
@@ -804,8 +936,18 @@
     render();
     rafId = win.requestAnimationFrame(frame);
 
-    return { stop: stop };
+    return Object.freeze({ stop: stop });
   }
 
-  window.AimlabFlappy = { start: start };
+  // Frozen for the same reason AimlabChase is (V2.6 layer 1): the module cannot
+  // be edited from the console, and neither can the handle it returns. The
+  // non-writable descriptor is what stops the whole binding being replaced --
+  // freezing the object alone leaves `window.AimlabFlappy = {...}` working.
+  try {
+    Object.defineProperty(window, 'AimlabFlappy', {
+      value: Object.freeze({ start: start }), writable: false, configurable: false, enumerable: true
+    });
+  } catch (e) {
+    window.AimlabFlappy = Object.freeze({ start: start });
+  }
 })();

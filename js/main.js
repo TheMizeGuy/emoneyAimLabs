@@ -149,26 +149,31 @@
     if (!skipFlappy && window.AimlabFlappy && window.AimlabFlappy.start) {
       flappy = window.AimlabFlappy.start(stage, {
         targetScore: TARGET_SCORE,
-        onComplete: function () {
+        // Unchanged handoff: at 10 points flappy stops and the chase starts. The
+        // info argument is new in V2.7 and purely additive -- it carries flappy's
+        // sus count and any state verdict across so the chase can show them.
+        onComplete: function (info) {
           if (flappy && flappy.stop) flappy.stop();
           flappy = null;
-          startSimChase();
+          startSimChase(info);
         }
       });
       return;
     }
 
     if (!skipFlappy) ERR('[AIMLAB] flappy unavailable, starting the chase directly');
-    startSimChase();
+    startSimChase(null);
   }
 
-  function startSimChase() {
+  function startSimChase(info) {
     chase = window.AimlabChase.start(stage, {
       imageSrc: SIMULATION.imageSrc,
       imageW: SIMULATION.imageW,
       imageH: SIMULATION.imageH,
       bestKey: SIMULATION.bestKey,
       recordBest: !isSeam,
+      susSeed: (info && info.sus > 0) ? info.sus : 0,
+      stateCheat: !!(info && info.stateCheat),
       // A non-null object tells the engine this module owns the audio. Either
       // field may still be null; pushAudio fills them in as they arrive.
       audio: { ctx: ctx, buffer: buffer }

@@ -1,26 +1,34 @@
 # eMoney Aim Labs
 
-A browser game that exists to make you angry at a popup ad. The eMoney logo
-lives inside a small card that does not want to be closed: it wanders the
-page, and the moment your cursor gets close, it flees faster. Click the X in
-its top-right corner to end its life. Good luck.
+A browser game that exists to make you angry at a popup ad. The start
+screen offers two modes. Pick one and go make yourself miserable.
 
 ## Play
 
 https://themizeguy.github.io/emoneyAimLabs/
 
-## Scoring
+## Modes
 
-The timer starts the instant you move your mouse and stops the moment you
-land the click on the X. Every miss and near-miss along the way gets counted
-against you. Your best time is saved locally in your browser, so you can
-watch your record mock you on the next attempt.
+**Practice Mode** - the original chase. The eMoney logo lives inside a
+tiny Windows-95-style popup window that does not want to be closed: it
+wanders the desktop, and the moment your cursor gets close, it flees
+faster. Click the beveled X in its title bar to end its life. Timer,
+misses, near-misses, and your best time are tracked and saved locally.
+
+**Simulation (LOUD!)** - TURN YOUR VOLUME DOWN FIRST. This mode is
+genuinely loud. It opens with a from-scratch Flappy-style gauntlet: flap
+through pipes until you reach 10 points in a single run (any death
+resets your score to zero). Clear that and the chase begins, now with a
+different face on the run and an 8-second audio loop playing at full
+volume for the rest of the round.
+
+Every missed click, in both modes, triggers its own synthesized
+Windows-error chord.
 
 ## Fair play
 
-The close button only responds to real, trusted pointer clicks. Keyboard
-activation and synthetic or programmatic clicks are rejected. If you were
-about to script your way to a win, the game already thought of that.
+The close button only responds to real, trusted pointer clicks, and the
+game keeps a running tally of anything that looks like tampering.
 
 ## Run it locally
 
@@ -31,15 +39,20 @@ serve it:
 python3 -m http.server
 ```
 
-No build step, no dependencies, no CDN calls. It is one HTML file and one
-PNG.
+No build step, no dependencies, no CDN calls.
 
 ## Repo layout
 
-- `index.html` — the entire game: markup, styling, and logic in one file.
-- `assets/emoney.png` — the target.
+- `index.html` - the shell: start screen, mode router, loads the scripts.
+- `js/chase.js` - the chase engine shared by both modes.
+- `js/flappy.js` - the Flappy-style gauntlet in Simulation mode.
+- `js/main.js` - wiring between the start screen and the game modes.
+- `js/sentinel.js` - anti-tamper plumbing.
+- `assets/emoney.png` - the Practice Mode target.
+- `assets/simulation.png` - the Simulation Mode target.
+- `assets/loop.wav` - the Simulation Mode audio loop.
 
 ---
 
-Built by a team of Claude Code agents on request, because someone decided a
-genuinely frustrating popup-ad simulator was worth shipping.
+Built by a team of Claude Code agents on request, because someone decided
+a genuinely frustrating popup-ad simulator was worth shipping.
