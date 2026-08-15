@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>eMoney Aim Labs</title>
+<!-- data: icon so the browser never issues a /favicon.ico request -->
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg:      #0a0c10;
+    --panel:   #14171e;
+    --panel-2: #1b1f28;
+    --line:    #272c37;
+    --line-2:  #383f4d;
+    --ink:     #ccd4e2;
+    --muted:   #79839a;
+    --accent:  #ffc061;
+    --danger:  #ff5f56;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    /* touch-action: none keeps a phone from scrolling the playfield away */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    cursor: crosshair;
+  }
+
+  /* graph-paper playfield, faded out toward the edges */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(126, 148, 184, 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(126, 148, 184, 0.055) 1px, transparent 1px);
+    background-size: 34px 34px, 34px 34px;
+    -webkit-mask-image: radial-gradient(125% 105% at 50% 44%, #000 28%, transparent 80%);
+    mask-image: radial-gradient(125% 105% at 50% 44%, #000 28%, transparent 80%);
+  }
+
+  /* faint range rings, like a target lane */
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: repeating-radial-gradient(
+      circle at 50% 44%,
+      transparent 0 129px,
+      rgba(120, 178, 235, 0.05) 129px 130px
+    );
+  }
+
+  .hud {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 10;
+    pointer-events: none;
+    display: grid;
+    gap: 3px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: rgba(14, 17, 23, 0.72);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .hud .row {
+    display: grid;
+    grid-template-columns: 62px auto;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .hud .k {
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.13em;
+  }
+
+  .hud .v {
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .hud .row.time .v {
+    color: var(--accent);
+    font-size: 17px;
+    letter-spacing: 0.02em;
+  }
+
+  .hud .row.best .v { color: #8fd0a4; }
+  .hud .row.hide { display: none; }
+
+  .sig {
+    position: fixed;
+    left: 16px;
+    bottom: 16px;
+    z-index: 10;
+    pointer-events: none;
+    max-width: min(520px, calc(100vw - 32px));
+  }
+
+  .sig h1 {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--ink);
+  }
+
+  .sig p {
+    margin: 5px 0 0;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+
+  /* ---- the popup ------------------------------------------------------ */
+  /* The wrapper owns the translate3d so the card is free to run its own
+     pop-out transform on the win animation without fighting the physics. */
+  .wrap {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 280px;
+    z-index: 20;
+    will-change: transform;
+  }
+
+  .card {
+    position: relative;
+    width: 100%;
+    background: var(--panel);
+    border: 1px solid var(--line-2);
+    border-radius: 4px;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.6), 0 2px 0 rgba(255, 255, 255, 0.03) inset;
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 26px;
+    padding: 0 36px 0 10px;
+    background: linear-gradient(180deg, #232833 0%, #191d25 100%);
+    border-bottom: 1px solid var(--line);
+    border-radius: 3px 3px 0 0;
+  }
+
+  .bar .tag {
+    flex: none;
+    padding: 1px 4px;
+    border: 1px solid #4a4030;
+    border-radius: 2px;
+    background: #2a2418;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 8.5px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+
+  .bar .label {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #97a1b3;
+  }
+
+  .body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 16px 14px;
+  }
+
+  .frame {
+    line-height: 0;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: #fff;
+  }
+
+  .frame img {
+    display: block;
+    width: 128px;
+    height: 128px;
+    -webkit-user-drag: none;
+  }
+
+  .cap {
+    margin: 0;
+    text-align: center;
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: #8b94a6;
+  }
+
+  /* 28x28, hung slightly off the card's top-right corner */
+  .x {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    z-index: 2;
+    width: 28px;
+    height: 28px;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--line-2);
+    border-radius: 50%;
+    background: #1e2129;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+
+  .x::before,
+  .x::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 12px;
+    height: 2px;
+    border-radius: 1px;
+    background: #adb6c6;
+  }
+
+  .x::before { transform: translate(-50%, -50%) rotate(45deg); }
+  .x::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+
+  .x:hover {
+    background: #3a1a1c;
+    border-color: #8c3238;
+  }
+
+  .x:hover::before,
+  .x:hover::after { background: var(--danger); }
+
+  .x:focus { outline: none; }
+  .x:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
+
+  .taunt {
+    position: absolute;
+    left: 50%;
+    top: calc(100% + 9px);
+    padding: 5px 9px;
+    border: 1px solid var(--line-2);
+    border-radius: 3px;
+    background: rgba(20, 23, 30, 0.95);
+    color: #c3cbda;
+    font-family: var(--mono);
+    font-size: 11px;
+    white-space: nowrap;
+    opacity: 0;
+    transform: translate(-50%, 5px);
+    transition: opacity 0.12s ease-out, transform 0.12s ease-out;
+  }
+
+  .taunt.on {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  .card.gone {
+    animation: pop 0.28s cubic-bezier(0.4, 0, 0.9, 0.4) forwards;
+    pointer-events: none;
+  }
+
+  @keyframes pop {
+    0%   { transform: scale(1);    opacity: 1; }
+    38%  { transform: scale(1.16); opacity: 1; }
+    100% { transform: scale(0.18); opacity: 0; }
+  }
+
+  /* ---- win overlay ---------------------------------------------------- */
+  .ov {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(6, 8, 11, 0.78);
+  }
+
+  .ov.show { display: flex; }
+
+  .ovcard {
+    width: min(360px, 100%);
+    padding: 22px 22px 20px;
+    border: 1px solid var(--line-2);
+    border-radius: 5px;
+    background: var(--panel);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    text-align: center;
+  }
+
+  .ovkicker {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .ovtime {
+    margin: 8px 0 2px;
+    font-family: var(--mono);
+    font-size: 34px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    color: var(--accent);
+  }
+
+  .ovnote {
+    margin: 0;
+    height: 15px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: #8fd0a4;
+  }
+
+  .ovstats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin: 16px 0 18px;
+    padding: 12px 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .ovstats div { display: grid; gap: 4px; }
+
+  .ovstats dt {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .ovstats dd {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  .again {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1px solid var(--line-2);
+    border-radius: 3px;
+    background: var(--panel-2);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .again:hover { border-color: var(--accent); color: var(--accent); }
+
+  @media (max-width: 520px) {
+    .sig { max-width: calc(100vw - 32px); }
+    .sig p { font-size: 11.5px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="hud" id="hud">
+  <div class="row time"><span class="k">TIME</span><span class="v" id="hudTime">00:00.000</span></div>
+  <div class="row"><span class="k">MISSES</span><span class="v" id="hudMiss">0</span></div>
+  <div class="row"><span class="k">NEAR</span><span class="v" id="hudNear">0</span></div>
+  <div class="row best hide" id="hudBestRow"><span class="k">BEST</span><span class="v" id="hudBest">--</span></div>
+</div>
+
+<div class="sig">
+  <h1>eMoney Aim Labs</h1>
+  <p>Close the popup to win. It has opinions about being closed.</p>
+</div>
+
+<div class="wrap" id="wrap">
+  <div class="card" id="card">
+    <div class="bar">
+      <span class="tag">AD</span>
+      <span class="label">eMoney Rewards Center</span>
+    </div>
+    <button class="x" id="closeBtn" type="button" aria-label="Close" tabindex="-1"></button>
+    <div class="body">
+      <span class="frame"><img src="./assets/emoney.png" alt="eMoney" width="128" height="128" draggable="false"></span>
+      <p class="cap">He will not leave until you close this.</p>
+    </div>
+    <div class="taunt" id="taunt" aria-hidden="true"></div>
+  </div>
+</div>
+
+<div class="ov" id="overlay">
+  <div class="ovcard">
+    <p class="ovkicker">Popup closed</p>
+    <p class="ovtime" id="ovTime">00:00.000</p>
+    <p class="ovnote" id="ovNote"></p>
+    <dl class="ovstats">
+      <div><dt>Misses</dt><dd id="ovMiss">0</dd></div>
+      <div><dt>Near</dt><dd id="ovNear">0</dd></div>
+      <div><dt>Best</dt><dd id="ovBest">--</dd></div>
+    </dl>
+    <button class="again" id="again" type="button">Play again</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------- tuning ---------------- */
+  var FLEE_RADIUS        = 300;    // px, measured cursor -> nearest point of the card rect
+  var FLEE_ACCEL         = 9000;   // px/s^2 at d = 0, scaled by (1 - d/R)^2
+  var DODGE_GAIN         = 2.2;    // perpendicular px/s^2 per px/s of cursor approach speed
+  var DODGE_APPROACH_CAP = 2400;   // px/s
+  var DODGE_HOLD_MS      = 300;    // dodge sign stays put this long so the swerve reads as intent
+  var BASE_SPEED         = 150;    // px/s idle wander
+  var WANDER_GAIN        = 4.0;    // 1/s, how hard wander steers velocity toward its target
+  var SPEED_CAP_FAR      = 1600;
+  var SPEED_CAP_NEAR_ADD = 500;
+  var SPEED_CAP_HARD     = 2100;
+  var RESTITUTION        = 0.9;
+  var BOUNCE_JITTER      = 10 * Math.PI / 180;
+  var PANIC_MS           = 260;
+  var PANIC_ACCEL        = 4000;
+  var PANIC_SPEED        = 900;
+  var BURST_MS           = 1500;
+  var BURST_MUL          = 1.6;
+  var DT_MAX             = 0.032;  // s, keeps a backgrounded tab from integrating one giant step
+  var NEAR_RADIUS        = 48;     // px from the close button's center
+  var NEAR_DEBOUNCE      = 250;    // ms
+  var EDGE_PAD           = 10;     // covers the close button's 6px corner overhang
+  var LATCH_MAX_MS       = 600;    // failsafe so a lost pointerup cannot freeze the card forever
+  var BEST_KEY           = 'emoney-aimlabs-best';
+
+  var TAUNTS = [
+    'Wrong spot. The X is the small one.',
+    'That was the ad, not the button.',
+    'He is not going anywhere.',
+    'Slower than that and it never closes.',
+    'You clicked the face. Bold.',
+    'Still open.'
+  ];
+  var TAUNT_FAKE = 'Real clicks only. Keyboard does not count.';
+
+  /* ---------------- elements ---------------- */
+  var wrap    = document.getElementById('wrap');
+  var card    = document.getElementById('card');
+  var btn     = document.getElementById('closeBtn');
+  var taunt   = document.getElementById('taunt');
+  var overlay = document.getElementById('overlay');
+  var elTime  = document.getElementById('hudTime');
+  var elMiss  = document.getElementById('hudMiss');
+  var elNear  = document.getElementById('hudNear');
+  var elBest  = document.getElementById('hudBest');
+  var rowBest = document.getElementById('hudBestRow');
+
+  /* ---------------- state ---------------- */
+  var vw = window.innerWidth;
+  var vh = window.innerHeight;
+  var cardW = 280, cardH = 212;      // replaced by a real measurement in measure()
+  var btnOffX = 126, btnOffY = -92;  // close button center, relative to card center
+
+  var x = vw / 2, y = vh / 2;        // card center
+  var vx = 0, vy = 0;
+
+  var heading = Math.random() * Math.PI * 2;
+  var wanderT = 0;
+  var ph1 = Math.random() * 6.283, ph2 = Math.random() * 6.283, ph3 = Math.random() * 6.283;
+
+  var px = 0, py = 0, hasPointer = false;
+  var cvx = 0, cvy = 0;              // smoothed cursor velocity
+  var velX = 0, velY = 0, velT = 0;
+
+  var dodgeSign = 1, dodgeAt = 0;
+  var overlapping = false, panicUntil = 0;
+  var burstUntil = 0;
+  var pressLatch = false, pressLatchAt = 0;
+
+  var nearInside = false, nearAt = -1e9;
+  var started = false, startT = 0, won = false, finalMs = 0;
+  var misses = 0, nearMisses = 0;
+  var bestMs = readBest();
+
+  var lastT = 0, rafId = 0, tauntTimer = 0;
+
+  /* ---------------- helpers ---------------- */
+
+  // xorshift32: a stable pseudo-random source for dodge signs and bounce jitter
+  var seed = (Date.now() ^ 0x9e3779b9) >>> 0;
+  function rnd() {
+    seed ^= seed << 13; seed >>>= 0;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;  seed >>>= 0;
+    return seed / 4294967296;
+  }
+
+  function fmt(ms) {
+    if (!isFinite(ms) || ms < 0) ms = 0;
+    ms = Math.floor(ms);
+    var m = Math.floor(ms / 60000);
+    var s = Math.floor(ms / 1000) % 60;
+    var f = ms % 1000;
+    return pad(m, 2) + ':' + pad(s, 2) + '.' + pad(f, 3);
+  }
+
+  function pad(n, w) {
+    var out = String(n);
+    while (out.length < w) out = '0' + out;
+    return out;
+  }
+
+  function setText(el, v) {
+    var s = String(v);
+    if (el.textContent !== s) el.textContent = s;
+  }
+
+  function readBest() {
+    try {
+      var raw = window.localStorage.getItem(BEST_KEY);
+      if (raw === null) return null;
+      var n = parseInt(raw, 10);
+      return (isFinite(n) && n >= 0) ? n : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeBest(ms) {
+    try { window.localStorage.setItem(BEST_KEY, String(ms)); } catch (e) { /* storage blocked */ }
+  }
+
+  function showBest() {
+    if (bestMs === null) return;
+    setText(elBest, fmt(bestMs));
+    rowBest.classList.remove('hide');
+  }
+
+  function showTaunt(text) {
+    if (won) return;
+    taunt.textContent = text;
+    taunt.classList.add('on');
+    clearTimeout(tauntTimer);
+    tauntTimer = setTimeout(function () { taunt.classList.remove('on'); }, 1300);
+  }
+
+  function startTimer() {
+    if (started || won) return;
+    started = true;
+    startT = performance.now();
+    console.log('[AIMLAB] START');
+  }
+
+  function addMiss() {
+    misses++;
+    setText(elMiss, misses);
+    console.log('[AIMLAB] MISS n=' + misses);
+  }
+
+  /* ---------------- layout ---------------- */
+
+  function measure() {
+    if (won) return;
+    vw = window.innerWidth;
+    vh = window.innerHeight;
+
+    var cr = card.getBoundingClientRect();
+    if (cr.width > 0 && cr.height > 0) {
+      cardW = cr.width;
+      cardH = cr.height;
+      var br = btn.getBoundingClientRect();
+      if (br.width > 0) {
+        btnOffX = (br.left + br.width / 2) - (cr.left + cr.width / 2);
+        btnOffY = (br.top + br.height / 2) - (cr.top + cr.height / 2);
+      }
+    }
+    clampIntoView();
+    render();
+  }
+
+  function clampIntoView() {
+    var hw = cardW / 2, hh = cardH / 2;
+    var minX = hw + EDGE_PAD, maxX = vw - hw - EDGE_PAD;
+    var minY = hh + EDGE_PAD, maxY = vh - hh - EDGE_PAD;
+    // If the viewport is smaller than the card there is no legal band; park it centered.
+    x = (maxX > minX) ? Math.min(maxX, Math.max(minX, x)) : vw / 2;
+    y = (maxY > minY) ? Math.min(maxY, Math.max(minY, y)) : vh / 2;
+  }
+
+  function render() {
+    wrap.style.transform =
+      'translate3d(' + (x - cardW / 2).toFixed(2) + 'px,' + (y - cardH / 2).toFixed(2) + 'px,0)';
+  }
+
+  /* ---------------- pointer ---------------- */
+
+  function setPointer(cx, cy, t) {
+    px = cx;
+    py = cy;
+    var dtc = (t - velT) / 1000;
+    if (hasPointer && velT > 0 && dtc >= 0.004) {
+      var k = Math.min(1, dtc / 0.05);   // exponential-ish smoothing of raw sample velocity
+      cvx += ((px - velX) / dtc - cvx) * k;
+      cvy += ((py - velY) / dtc - cvy) * k;
+      velX = px; velY = py; velT = t;
+    } else if (!hasPointer || velT === 0) {
+      velX = px; velY = py; velT = t;
+      cvx = 0; cvy = 0;
+    }
+    hasPointer = true;
+  }
+
+  function dropPointer() {
+    hasPointer = false;
+    cvx = 0; cvy = 0;
+    velT = 0;
+    nearInside = false;
+  }
+
+  window.addEventListener('pointermove', function (e) {
+    startTimer();
+    setPointer(e.clientX, e.clientY, performance.now());
+  }, { passive: true });
+
+  window.addEventListener('pointerdown', function (e) {
+    startTimer();
+    setPointer(e.clientX, e.clientY, performance.now());
+  }, { passive: true, capture: true });
+
+  document.addEventListener('pointerleave', dropPointer);
+  window.addEventListener('blur', dropPointer);
+
+  window.addEventListener('touchstart', function (e) {
+    var t0 = e.touches[0];
+    if (!t0) return;
+    startTimer();
+    setPointer(t0.clientX, t0.clientY, performance.now());
+  }, { passive: true });
+
+  window.addEventListener('touchmove', function (e) {
+    var t0 = e.touches[0];
+    if (!t0) return;
+    startTimer();
+    setPointer(t0.clientX, t0.clientY, performance.now());
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  window.addEventListener('touchend', dropPointer, { passive: true });
+  window.addEventListener('touchcancel', dropPointer, { passive: true });
+
+  document.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
+  /* ---------------- input: press, click, keys ---------------- */
+
+  // A `click` only fires on the button when pointerdown and pointerup share it as an
+  // ancestor. A card moving at 2000 px/s would slide out from under a genuine press, so a
+  // trusted press that lands on the X latches the card still until the pointer is released.
+  btn.addEventListener('pointerdown', function (e) {
+    if (won || !e.isTrusted) return;
+    startTimer();
+    pressLatch = true;
+    pressLatchAt = performance.now();
+    try { btn.setPointerCapture(e.pointerId); } catch (err) { /* capture unsupported */ }
+  });
+
+  function releaseLatch() { pressLatch = false; }
+  window.addEventListener('pointerup', releaseLatch, true);
+  window.addEventListener('pointercancel', releaseLatch, true);
+
+  // tabindex="-1" already keeps the X out of the tab order; this blocks activation for a
+  // pointer-focused button as well, so the only way through is a real click.
+  btn.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      showTaunt(TAUNT_FAKE);
+    }
+  });
+
+  window.addEventListener('click', function (e) {
+    if (won) return;
+    startTimer();
+
+    var onX = (e.target === btn) || btn.contains(e.target);
+    if (onX) {
+      // detail > 0 rules out keyboard activation; isTrusted rules out dispatched events
+      if (e.isTrusted === true && e.detail > 0) {
+        win();
+        return;
+      }
+      showTaunt(TAUNT_FAKE);
+      addMiss();
+      return;
+    }
+
+    addMiss();
+    if (card.contains(e.target)) {
+      showTaunt(TAUNTS[Math.floor(rnd() * TAUNTS.length) % TAUNTS.length]);
+      burstUntil = performance.now() + BURST_MS;
+      var s = Math.sqrt(vx * vx + vy * vy);
+      if (s > 1) { vx *= BURST_MUL; vy *= BURST_MUL; }
+    }
+  }, true);
+
+  document.getElementById('again').addEventListener('click', function () {
+    window.location.reload();
+  });
+
+  window.addEventListener('resize', measure);
+
+  /* ---------------- physics ---------------- */
+
+  function bounce(nx, ny) {
+    // n points back into the playfield; vn is negative because we only call this on impact
+    var vn = vx * nx + vy * ny;
+    vx -= (1 + RESTITUTION) * vn * nx;
+    vy -= (1 + RESTITUTION) * vn * ny;
+
+    var a = (rnd() * 2 - 1) * BOUNCE_JITTER;
+    var c = Math.cos(a), s = Math.sin(a);
+    var rx = vx * c - vy * s;
+    var ry = vx * s + vy * c;
+    vx = rx; vy = ry;
+
+    // jitter must never rotate the velocity back into the wall it just left
+    var vn2 = vx * nx + vy * ny;
+    if (vn2 < 0) { vx -= 2 * vn2 * nx; vy -= 2 * vn2 * ny; }
+  }
+
+  function step(dt, now) {
+    // a parked cursor should read as approach speed zero within a few frames
+    var decay = Math.exp(-dt / 0.06);
+    cvx *= decay;
+    cvy *= decay;
+
+    if (pressLatch) {
+      if (now - pressLatchAt > LATCH_MAX_MS) pressLatch = false;
+      else return;
+    }
+
+    var hw = cardW / 2, hh = cardH / 2;
+    var minX = hw + EDGE_PAD, maxX = vw - hw - EDGE_PAD;
+    var minY = hh + EDGE_PAD, maxY = vh - hh - EDGE_PAD;
+
+    // distance from the cursor to the nearest point of the card rect
+    var d = Infinity, awx = 0, awy = 0;
+    if (hasPointer) {
+      var l = x - hw, r = x + hw, t0 = y - hh, b = y + hh;
+      var gx = (px < l) ? (l - px) : ((px > r) ? (px - r) : 0);
+      var gy = (py < t0) ? (t0 - py) : ((py > b) ? (py - b) : 0);
+      d = Math.sqrt(gx * gx + gy * gy);
+
+      var ox = x - px, oy = y - py;
+      var ol = Math.sqrt(ox * ox + oy * oy);
+      if (ol > 1e-6) { awx = ox / ol; awy = oy / ol; }
+      else { awx = Math.cos(heading); awy = Math.sin(heading); }  // cursor dead center
+    }
+
+    var prox = (d >= FLEE_RADIUS) ? 0 : (1 - d / FLEE_RADIUS);   // 0 far, 1 touching
+    var p2 = prox * prox;
+    var burst = (now < burstUntil) ? BURST_MUL : 1;
+
+    wanderT += dt;
+    var turn = 1.15 * Math.sin(wanderT * 0.73 + ph1)
+             + 0.72 * Math.sin(wanderT * 1.91 + ph2)
+             + 0.41 * Math.sin(wanderT * 3.37 + ph3);
+    heading += turn * 1.5 * dt;
+
+    var ax = 0, ay = 0;
+
+    if (hasPointer && prox > 0) {
+      ax += awx * FLEE_ACCEL * p2;
+      ay += awy * FLEE_ACCEL * p2;
+
+      // dodge sideways in proportion to how fast the cursor is closing in
+      var approach = cvx * awx + cvy * awy;
+      if (approach < 0) approach = 0;
+      if (approach > DODGE_APPROACH_CAP) approach = DODGE_APPROACH_CAP;
+      if (now - dodgeAt > DODGE_HOLD_MS) {
+        dodgeAt = now;
+        dodgeSign = (rnd() < 0.5) ? -1 : 1;
+      }
+      var dodge = dodgeSign * DODGE_GAIN * approach * p2;
+      ax += -awy * dodge;
+      ay += awx * dodge;
+    }
+
+    // Wander steering fades out as the cursor closes in, and is what pulls speed back down
+    // to BASE_SPEED once the cursor is outside the flee radius.
+    var wW = 1 - prox;
+    if (wW > 0) {
+      var tv = BASE_SPEED * burst;
+      ax += (Math.cos(heading) * tv - vx) * WANDER_GAIN * wW;
+      ay += (Math.sin(heading) * tv - vy) * WANDER_GAIN * wW;
+    }
+
+    // cursor sitting on top of the card: one short shove, then normal flee
+    if (hasPointer && d === 0) {
+      if (!overlapping) {
+        overlapping = true;
+        panicUntil = now + PANIC_MS;
+        var s0 = Math.sqrt(vx * vx + vy * vy);
+        var s1 = Math.max(s0, PANIC_SPEED);
+        vx = awx * s1;
+        vy = awy * s1;
+      }
+      if (now < panicUntil) {
+        ax += awx * PANIC_ACCEL;
+        ay += awy * PANIC_ACCEL;
+      }
+    } else {
+      overlapping = false;
+    }
+
+    vx += ax * dt;
+    vy += ay * dt;
+
+    var cap = Math.min(SPEED_CAP_HARD, (SPEED_CAP_FAR + SPEED_CAP_NEAR_ADD * prox) * burst);
+    var sp = Math.sqrt(vx * vx + vy * vy);
+    if (sp > cap && sp > 0) {
+      var k = cap / sp;
+      vx *= k;
+      vy *= k;
+    }
+
+    x += vx * dt;
+    y += vy * dt;
+
+    // Walls: clamp to the legal band, then reflect only the component heading into it.
+    if (maxX > minX) {
+      if (x < minX)      { x = minX; if (vx < 0) bounce(1, 0); }
+      else if (x > maxX) { x = maxX; if (vx > 0) bounce(-1, 0); }
+    } else {
+      x = vw / 2; vx = 0;
+    }
+
+    if (maxY > minY) {
+      if (y < minY)      { y = minY; if (vy < 0) bounce(0, 1); }
+      else if (y > maxY) { y = maxY; if (vy > 0) bounce(0, -1); }
+    } else {
+      y = vh / 2; vy = 0;
+    }
+
+    if (!isFinite(x) || !isFinite(y) || !isFinite(vx) || !isFinite(vy)) {
+      x = vw / 2; y = vh / 2; vx = 0; vy = 0;
+      clampIntoView();
+    }
+
+    // near miss: pointer entering the ring around the close button's center
+    if (hasPointer) {
+      var bx = x + btnOffX, by = y + btnOffY;
+      var ndx = px - bx, ndy = py - by;
+      var inZone = (ndx * ndx + ndy * ndy) <= NEAR_RADIUS * NEAR_RADIUS;
+      if (inZone && !nearInside && (now - nearAt) >= NEAR_DEBOUNCE) {
+        nearMisses++;
+        nearAt = now;
+        setText(elNear, nearMisses);
+      }
+      nearInside = inZone;
+    } else {
+      nearInside = false;
+    }
+  }
+
+  function frame(t) {
+    rafId = window.requestAnimationFrame(frame);
+
+    var dt = (t - lastT) / 1000;
+    lastT = t;
+    if (!(dt > 0)) dt = 1 / 60;
+    if (dt > DT_MAX) dt = DT_MAX;
+
+    step(dt, t);
+    render();
+
+    if (started) setText(elTime, fmt(t - startT));
+  }
+
+  /* ---------------- win ---------------- */
+
+  function win() {
+    if (won) return;
+    if (!started) startTimer();
+    won = true;
+    finalMs = Math.round(performance.now() - startT);
+
+    window.cancelAnimationFrame(rafId);
+    pressLatch = false;
+    clearTimeout(tauntTimer);
+    taunt.classList.remove('on');
+    card.classList.add('gone');
+
+    console.log('[AIMLAB] WIN time_ms=' + finalMs +
+                ' misses=' + misses +
+                ' near_misses=' + nearMisses);
+
+    setText(elTime, fmt(finalMs));
+
+    var isBest = (bestMs === null || finalMs < bestMs);
+    if (isBest) {
+      bestMs = finalMs;
+      writeBest(finalMs);
+    }
+    showBest();
+
+    setText(document.getElementById('ovTime'), fmt(finalMs));
+    setText(document.getElementById('ovMiss'), misses);
+    setText(document.getElementById('ovNear'), nearMisses);
+    setText(document.getElementById('ovBest'), bestMs === null ? '--' : fmt(bestMs));
+    setText(document.getElementById('ovNote'), isBest ? 'New best time.' : '');
+
+    setTimeout(function () {
+      overlay.classList.add('show');
+      var again = document.getElementById('again');
+      if (again && again.focus) again.focus();
+    }, 300);
+  }
+
+  /* ---------------- boot ---------------- */
+
+  showBest();
+  measure();
+  window.addEventListener('load', measure);
+
+  var img = document.querySelector('.frame img');
+  if (img) img.addEventListener('load', measure);
+
+  lastT = performance.now();
+  rafId = window.requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
