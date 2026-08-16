@@ -214,38 +214,22 @@ function camouflagePiece(piece) {
   fillRect(piece, PIECE - edge, 0, edge, PIECE, dark);
 }
 
-function stylizePiece(source, rng) {
+// The piece keeps the scene's own colours and orientation. It used to be rotated
+// a random quarter turn, sometimes inverted in brightness, posterized to five
+// luminance levels and remapped onto a random colour ramp - which rendered a
+// blue-grey patch of city as flat green, upside down. Players could not solve it,
+// and the numbers say why: with the candidates blanked and the piece recoloured,
+// nothing on screen relates the two, so four rounds of one-shot guessing at 1 in 4
+// is about a 1% chance of finishing an honest run.
+//
+// Removing those transforms costs nothing against a machine. The mechanical
+// matcher this is hardened against scores BOUNDARY continuity, and what denies it
+// that is camouflagePiece blanking the outer edge below, plus the frame punchHoles
+// paints around every candidate - neither of which depends on the colours or the
+// angle. The transforms only ever blinded the human.
+function stylizePiece(source) {
   const out = image(PIECE, PIECE);
-  const turns = rng.int(4);
-  const inverted = rng.int(2) === 1;
-  const low = [rng.int(65), rng.int(65), rng.int(65)];
-  const high = [190 + rng.int(66), 190 + rng.int(66), 190 + rng.int(66)];
-
-  function sourcePoint(x, y) {
-    if (turns === 1) return { x: y, y: PIECE - 1 - x };
-    if (turns === 2) return { x: PIECE - 1 - x, y: PIECE - 1 - y };
-    if (turns === 3) return { x: PIECE - 1 - y, y: x };
-    return { x, y };
-  }
-
-  for (let y = 0; y < PIECE; y += 1) {
-    for (let x = 0; x < PIECE; x += 1) {
-      const point = sourcePoint(x, y);
-      const from = (point.y * PIECE + point.x) * 4;
-      let level = Math.round((
-        source.pixels[from] * 0.299
-        + source.pixels[from + 1] * 0.587
-        + source.pixels[from + 2] * 0.114
-      ) / 255 * 4) / 4;
-      if (inverted) level = 1 - level;
-      setPixel(out, x, y, [
-        Math.round(low[0] + (high[0] - low[0]) * level),
-        Math.round(low[1] + (high[1] - low[1]) * level),
-        Math.round(low[2] + (high[2] - low[2]) * level),
-        255,
-      ]);
-    }
-  }
+  source.pixels.copy(out.pixels, 0, 0, PIECE * PIECE * 4);
   camouflagePiece(out);
   return out;
 }
@@ -326,7 +310,6 @@ function buildChallenge({ runId, seed, secret }) {
     const holes = challengeHoles(rng);
     const piece = stylizePiece(
       copyRect(scene, holes[answers[round]].x, holes[answers[round]].y, PIECE, PIECE),
-      rng,
     );
     punchHoles(scene, holes);
     rounds.push({

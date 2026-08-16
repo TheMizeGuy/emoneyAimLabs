@@ -1784,31 +1784,43 @@
     function capRelease(e) {
       if (!capDrag) return;
       capDrag = false;
-      capArmed = false;
-      if (capUsed) return;               // exactly one drop per server round
-      capUsed = true;
+      if (capUsed) return;               // exactly one ANSWER per server round
       var choice = -1, nearest = Infinity;
       for (var i = 0; i < capHoles.length; i++) {
         var dx = capPX - capHoles[i][0], dy = capPY - capHoles[i][1];
         var distance = Math.sqrt(dx * dx + dy * dy);
         if (distance < nearest) { nearest = distance; choice = i; }
       }
-      if (choice >= 0 && nearest <= CAPTCHA_TOL) {
-        capPX = capHoles[choice][0];
-        capPY = capHoles[choice][1];
+      /* Letting go anywhere else is not an answer, it is a slip. The piece holds
+         pointer capture for the whole drag, so releasing early -- crossing the
+         scene, catching the edge of the dialog, a trackpad that lets go on its
+         own -- used to land here, miss every candidate, and end the run on the
+         spot with "That is not where the piece goes." Put it back and let them
+         pick it up again. Committing to a candidate is still one shot: the
+         branch below consumes the attempt whether the choice is right or wrong,
+         so nothing is learned by trying, and the answers still travel as one
+         batch the server grades at the end. */
+      if (!(choice >= 0 && nearest <= CAPTCHA_TOL)) {
+        capPX = capHX;
+        capPY = capHY;
         capPlace();
-        capAnswers.push(choice);
-        if (capRound + 1 < capPayload.rounds.length) {
-          capRound++;
-          capPiece.style.visibility = 'hidden';
-          capBuild(capPayload.rounds[capRound]).then(function (built) {
-            if (!built && capShown && !stopped && !banned) banPlayer('captcha-fail');
-          });
-        } else {
-          solveCaptcha();
-        }
+        if (e && e.preventDefault) e.preventDefault();
+        return;
+      }
+      capUsed = true;
+      capArmed = false;
+      capPX = capHoles[choice][0];
+      capPY = capHoles[choice][1];
+      capPlace();
+      capAnswers.push(choice);
+      if (capRound + 1 < capPayload.rounds.length) {
+        capRound++;
+        capPiece.style.visibility = 'hidden';
+        capBuild(capPayload.rounds[capRound]).then(function (built) {
+          if (!built && capShown && !stopped && !banned) banPlayer('captcha-fail');
+        });
       } else {
-        banPlayer('captcha-fail');        // no snap-back, no second try
+        solveCaptcha();
       }
       if (e && e.preventDefault) e.preventDefault();
     }
