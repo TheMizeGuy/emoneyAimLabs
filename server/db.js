@@ -60,7 +60,7 @@ const SCHEMA = [
      outcome          text NOT NULL DEFAULT 'open',
      time_ms          integer,
      fail_reason      text,
-     CONSTRAINT runs_mode_ck CHECK (mode IN ('practice', 'simulation')),
+     CONSTRAINT runs_mode_ck CHECK (mode IN ('practice', 'simulation', 'impossible')),
      CONSTRAINT runs_outcome_ck CHECK (outcome IN ('open', 'won', 'failed')),
      CONSTRAINT runs_counters_ck CHECK (
        beats >= 0 AND beat_counter = beats
@@ -99,10 +99,10 @@ const SCHEMA = [
      near_misses integer NOT NULL,
      achieved_at timestamptz NOT NULL,
      PRIMARY KEY (user_id, mode),
-     CONSTRAINT scores_mode_ck CHECK (mode IN ('practice', 'simulation')),
+     CONSTRAINT scores_mode_ck CHECK (mode IN ('practice', 'simulation', 'impossible')),
      CONSTRAINT scores_time_ck CHECK (
        time_ms > 0 AND time_ms <= 7200000
-       AND (mode <> 'simulation' OR time_ms <= 61000)
+       AND (mode NOT IN ('simulation', 'impossible') OR time_ms <= 61000)
      ),
      CONSTRAINT scores_counters_ck CHECK (
        misses >= 0 AND misses <= 10000
@@ -121,10 +121,10 @@ const SCHEMA = [
      created_at  timestamptz NOT NULL,
      CONSTRAINT score_submissions_user_fk FOREIGN KEY (user_id)
        REFERENCES users(twitch_id) ON DELETE CASCADE,
-     CONSTRAINT score_submissions_mode_ck CHECK (mode IN ('practice', 'simulation')),
+     CONSTRAINT score_submissions_mode_ck CHECK (mode IN ('practice', 'simulation', 'impossible')),
      CONSTRAINT score_submissions_time_ck CHECK (
        time_ms > 0 AND time_ms <= 7200000
-       AND (mode <> 'simulation' OR time_ms <= 61000)
+       AND (mode NOT IN ('simulation', 'impossible') OR time_ms <= 61000)
      ),
      CONSTRAINT score_submissions_counters_ck CHECK (
        misses >= 0 AND misses <= 10000
@@ -235,6 +235,23 @@ const SCHEMA = [
      misses >= 0 AND misses <= 10000
      AND near_misses >= 0 AND near_misses <= 10000
    )`,
+  // V4.0: the Impossible mode. Databases created before it exists carry the
+  // two-mode CHECKs, which would refuse every Impossible row at the very
+  // bottom of the stack. Same 61 s ceiling as Simulation: both clients run the
+  // 60 s shot clock.
+  `ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_mode_ck;
+   ALTER TABLE runs ADD CONSTRAINT runs_mode_ck CHECK (
+     mode IN ('practice', 'simulation', 'impossible')
+   )`,
+  `ALTER TABLE scores DROP CONSTRAINT IF EXISTS scores_mode_ck;
+   ALTER TABLE scores DROP CONSTRAINT IF EXISTS scores_time_ck;
+   ALTER TABLE scores ADD CONSTRAINT scores_mode_ck CHECK (
+     mode IN ('practice', 'simulation', 'impossible')
+   );
+   ALTER TABLE scores ADD CONSTRAINT scores_time_ck CHECK (
+     time_ms > 0 AND time_ms <= 7200000
+     AND (mode NOT IN ('simulation', 'impossible') OR time_ms <= 61000)
+   )`,
   // The immutable submission ledger is independently valid even if a future
   // internal writer bypasses the API and leaderboard table.
   `ALTER TABLE score_submissions
@@ -249,11 +266,13 @@ const SCHEMA = [
      ADD CONSTRAINT score_submissions_user_fk FOREIGN KEY (user_id)
        REFERENCES users(twitch_id) ON DELETE CASCADE;
    ALTER TABLE score_submissions
-     ADD CONSTRAINT score_submissions_mode_ck CHECK (mode IN ('practice', 'simulation'));
+     ADD CONSTRAINT score_submissions_mode_ck CHECK (
+       mode IN ('practice', 'simulation', 'impossible')
+     );
    ALTER TABLE score_submissions
      ADD CONSTRAINT score_submissions_time_ck CHECK (
        time_ms > 0 AND time_ms <= 7200000
-       AND (mode <> 'simulation' OR time_ms <= 61000)
+       AND (mode NOT IN ('simulation', 'impossible') OR time_ms <= 61000)
      );
    ALTER TABLE score_submissions
      ADD CONSTRAINT score_submissions_counters_ck CHECK (

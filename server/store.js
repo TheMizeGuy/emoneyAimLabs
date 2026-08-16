@@ -903,10 +903,12 @@ function createStore(pool) {
               u.flappy_fails, u.chase_fails, u.runs_failed_total,
               p.time_ms AS best_practice_ms,
               s.time_ms AS best_sim_ms,
+              i.time_ms AS best_imp_ms,
               COALESCE(w.n, 0) AS wins
        FROM users u
        LEFT JOIN scores p ON p.user_id = u.twitch_id AND p.mode = 'practice'
        LEFT JOIN scores s ON s.user_id = u.twitch_id AND s.mode = 'simulation'
+       LEFT JOIN scores i ON i.user_id = u.twitch_id AND i.mode = 'impossible'
        LEFT JOIN (SELECT user_id, COUNT(*) AS n FROM score_submissions GROUP BY user_id) w
               ON w.user_id = u.twitch_id
        ORDER BY u.runs_failed_total DESC, u.twitch_id ASC
@@ -923,6 +925,7 @@ function createStore(pool) {
       wins: Number(row.wins || 0),
       bestPracticeMs: row.best_practice_ms === null ? null : Number(row.best_practice_ms),
       bestSimMs: row.best_sim_ms === null ? null : Number(row.best_sim_ms),
+      bestImpMs: row.best_imp_ms === null ? null : Number(row.best_imp_ms),
     }));
   }
 

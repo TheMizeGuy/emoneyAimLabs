@@ -140,6 +140,12 @@
     '<h1>eMoney Aim Labs</h1>',
     '<p>Close the popup to win. It has opinions about being closed.</p>',
     '</div>',
+    /* V4.0: the Impossible desktop rides in two static layers so opening and
+       closing folder windows never churns root's child list (mo2 watches it).
+       Icons sit under the popup, their windows over it. Hidden for every other
+       mode. */
+    '<div class="desk" data-el="desk"></div>',
+    '<div class="deskwins" data-el="deskWins"></div>',
     '<div class="wrap" data-el="wrap">',
     '<div class="card" data-el="card">',
     '<div class="cardin" data-el="cardin">',
@@ -404,6 +410,33 @@
     var MODE_LABEL         = (typeof opts.modeLabel === 'string' && opts.modeLabel)
                              ? opts.modeLabel.toUpperCase() : 'PRACTICE';
     var RECORD_BEST        = (opts.recordBest !== false);
+    var IMPOSSIBLE         = (MODE_LABEL === 'IMPOSSIBLE');
+
+    /* V4.0 -- Impossible. Simulation's window after it stops negotiating.
+       Only the EVASIVE terms move: it flees from further away, dodges a flick
+       roughly twice as hard, jinks half again as often, and its speed floor
+       under threat sits above Simulation's soft cap -- so the flick that ends
+       a Simulation run mostly buys a near miss here. The fairness guards
+       (camping, arming, resume, presence) are untouched on purpose, per the
+       V3.7 rule: harder to catch, never harder to be treated fairly. The
+       desktop folders below are the mode's second hazard. */
+    if (IMPOSSIBLE) {
+      FLEE_RADIUS        = 560;
+      FLEE_ACCEL         = 24000;
+      DODGE_GAIN         = 12.0;
+      DODGE_HOLD_MS      = 180;
+      BASE_SPEED         = 290;
+      SPEED_CAP_FAR      = 2950;
+      SPEED_CAP_NEAR_ADD = 850;
+      SPEED_CAP_HARD     = 3800;
+      SLIDE_ACCEL        = 12000;
+      BAIT_CHANCE        = 0.016;
+      BAIT_COOL_MS       = 500;
+      JINK_MS            = 230;
+      JINK_ACCEL         = 17500;
+      FLOOR_SPEED        = 3400;
+      SHOCK_IMPULSE      = 2100;
+    }
 
     /* V2.4: the error chord, synthesized. No Microsoft audio is fetched or shipped. */
     var ERROR_MS         = 200;   // total voice length
@@ -520,6 +553,7 @@
     var TAUNT_CAMP     = 'Camping is not aiming. Go and get it.';
     var TAUNT_ARMING   = 'He is not even awake yet. Wait for him.';
     var TAUNT_SPAM     = 'That is a macro, not a hand. Aim once instead.';
+    var TAUNT_FOLDER   = 'You have a folder open. One mess at a time.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
@@ -624,6 +658,8 @@
     var banSub    = el('banSub');
     var banRetry  = el('banRetry');
     var banHome   = el('banHome');
+    var deskEl    = el('desk');
+    var deskWins  = el('deskWins');
     /* These five were the only nodes in the file resolved by el() at use time
        rather than cached here. Both consumers null-guard, so dropping a
        data-el attribute in the elements panel made every write a silent no-op
@@ -701,7 +737,7 @@
     var CAPTCHA_ON = true;
     var PRESTART_CHALLENGE = (opts.challengeBeforeStart === true);
     var CAPTCHA_TIMED = !PRESTART_CHALLENGE;
-    var SHOT_CLOCK_ON = (MODE_LABEL === 'SIMULATION');
+    var SHOT_CLOCK_ON = (MODE_LABEL === 'SIMULATION' || IMPOSSIBLE);
     var shotLeftShown = -1;
     var capBroken = false, capShown = false, capAt = Infinity, capShownAt = 0, capBeatT = 0;
     var capShownWall = 0, capShownWall2 = 0;
@@ -1416,6 +1452,13 @@
     function checkStructure() {
       if (won || banned || stopped) return;
       var n = 0;
+      // The desk layers come back with their children attached, so deleting
+      // the hazard in the elements panel restores every seeded icon and any
+      // window still open -- and each seeded icon is re-attested on its own,
+      // the same treatment the close button gets.
+      n += ensure(root, deskEl, wrap);
+      n += ensure(root, deskWins, wrap);
+      for (var di = 0; di < deskIcons.length; di++) n += ensure(deskEl, deskIcons[di], null);
       n += ensure(root, wrap, null);
       n += ensure(wrap, card, taunt);
       n += ensure(card, cardin, null);
@@ -2311,6 +2354,151 @@
 
     on(document, 'dragstart', function (e) { e.preventDefault(); });
 
+    /* ---------------- V4.0: the Impossible desktop ----------------
+       Folders seeded across the field behind the popup. A click on one is a
+       desktop click like any other, so the shared handler below charges it a
+       miss and a shockwave -- and it ALSO opens an empty Explorer window at a
+       random spot, which must be closed before the X can be won. The open
+       count is closure state: deleting a window node in devtools does not
+       close it, it just leaves the X refusing forever. All annoyance, never a
+       wall the server relies on -- the run and shot clocks charge throughout,
+       and closing a window costs nothing but the trip. */
+    var FOLDER_COUNT   = 7;
+    var FOLDER_MIN_GAP = 130;   // px between icon origins when seeding
+    var FW_W = 232, FW_H = 156; // the folder window, chrome included
+    var FOLDER_NAMES = ['New Folder', 'New Folder (2)', 'My Documents',
+                        'DO NOT OPEN', 'taxes 1997', 'backup (final)',
+                        'eMoney private', 'sim results OLD'];
+    var foldersOpen = 0;
+    var deskIcons = [];          // seeded nodes, so checkStructure can re-attest them
+
+    function deskLive() {
+      return IMPOSSIBLE && !won && !banned && !paused && !capShown && !stopped;
+    }
+
+    /* Fixed chrome the icons must never hide under, in field coordinates at
+       the minimum playable viewport -- the one case where the field's origin
+       meets the screen's. There the HUD (top-left, z 30, pointer-events none)
+       would paint OVER a seeded icon while passing clicks through to it: an
+       invisible hazard, which is a worse joke than the visible kind. The sig
+       text block has the mirror problem at bottom-left. At larger viewports
+       the chrome sits further off-field and these rects merely cost two
+       corners. Chrome rejection is HARD -- unlike the icon-gap test it is
+       never conceded to a crowded draw. */
+    var FOLDER_KEEPOUT = [
+      [0, 0, 250, 190],
+      [0, 500, 440, 620]
+    ];
+    var FOLDER_BOX_W = 96, FOLDER_BOX_H = 72;   // the icon's own footprint
+
+    function inKeepout(fx, fy) {
+      for (var k = 0; k < FOLDER_KEEPOUT.length; k++) {
+        var r = FOLDER_KEEPOUT[k];
+        if (fx < r[2] && fx + FOLDER_BOX_W > r[0]
+            && fy < r[3] && fy + FOLDER_BOX_H > r[1]) return true;
+      }
+      return false;
+    }
+
+    function seedFolders() {
+      if (!IMPOSSIBLE || !deskEl || !deskWins) return;
+      var names = FOLDER_NAMES.slice();
+      var placed = [];
+      for (var i = 0; i < FOLDER_COUNT; i++) {
+        // Rejection-sampled so icons never stack: the icon-gap test relaxes
+        // after enough failed draws (an overlap is only untidy), the chrome
+        // keep-out never does, and the last-resort draw comes from a central
+        // band that no keep-out touches.
+        var fx = 0, fy = 0, ok = false, tries = 0;
+        while (!ok && tries++ < 80) {
+          fx = 24 + rnd() * (PLAYFIELD_W - 144);
+          fy = 16 + rnd() * (PLAYFIELD_H - 110);
+          if (inKeepout(fx, fy)) continue;
+          ok = true;
+          if (tries <= 50) {
+            for (var j = 0; j < placed.length; j++) {
+              var gx = fx - placed[j][0], gy = fy - placed[j][1];
+              if (gx * gx + gy * gy < FOLDER_MIN_GAP * FOLDER_MIN_GAP) { ok = false; break; }
+            }
+          }
+        }
+        if (!ok) {
+          fx = 300 + rnd() * (PLAYFIELD_W - 450);
+          fy = 220 + rnd() * 180;
+        }
+        placed.push([fx, fy]);
+        var pick = Math.floor(rnd() * names.length) % names.length;
+        var icon = folderIcon(names.splice(pick, 1)[0], fx, fy);
+        deskIcons.push(icon);
+        deskEl.appendChild(icon);
+      }
+      deskEl.classList.add('on');
+      deskWins.classList.add('on');
+    }
+
+    function folderIcon(name, fx, fy) {
+      var f = document.createElement('div');
+      f.className = 'fold';
+      f.style.left = Math.round(fx) + 'px';
+      f.style.top = Math.round(fy) + 'px';
+      var ic = document.createElement('span');
+      ic.className = 'foldic';
+      f.appendChild(ic);
+      var lb = document.createElement('span');
+      lb.className = 'foldlb';
+      lb.textContent = name;
+      f.appendChild(lb);
+      // One window per folder at a time; re-clicking while it is open only
+      // costs the miss the shared handler already charged.
+      var holder = { open: false };
+      on(f, 'click', function (e) {
+        if (!e.isTrusted || !deskLive() || holder.open) return;
+        holder.open = true;
+        openFolderWindow(name, holder);
+      });
+      return f;
+    }
+
+    function openFolderWindow(name, holder) {
+      var fw = document.createElement('div');
+      fw.className = 'fw';
+      fw.style.left = Math.round(8 + rnd() * (PLAYFIELD_W - FW_W - 16)) + 'px';
+      fw.style.top = Math.round(8 + rnd() * (PLAYFIELD_H - FW_H - 16)) + 'px';
+
+      var bar = document.createElement('div');
+      bar.className = 'fwbar';
+      var title = document.createElement('span');
+      title.className = 'fwtitle';
+      title.textContent = name;
+      bar.appendChild(title);
+      var fwx = document.createElement('button');
+      fwx.className = 'fwx';
+      fwx.type = 'button';
+      fwx.setAttribute('aria-label', 'Close ' + name);
+      bar.appendChild(fwx);
+      fw.appendChild(bar);
+
+      var body = document.createElement('div');
+      body.className = 'fwbody';
+      var msg = document.createElement('p');
+      msg.textContent = (name === 'DO NOT OPEN') ? 'You were told.' : 'This folder is empty.';
+      body.appendChild(msg);
+      fw.appendChild(body);
+
+      foldersOpen++;
+      var closed = false;
+      on(fwx, 'click', function (e) {
+        if (!e.isTrusted || closed) return;
+        closed = true;
+        holder.open = false;
+        foldersOpen--;
+        if (fw.parentNode) fw.parentNode.removeChild(fw);
+        LOG('[AIMLAB] FOLDER CLOSED name=' + name + ' open=' + foldersOpen);
+      });
+      deskWins.appendChild(fw);
+      LOG('[AIMLAB] FOLDER OPENED name=' + name + ' open=' + foldersOpen);
+    }
+
     /* ---------------- input: press, click, keys ---------------- */
 
     // A `click` only fires on the button when pointerdown and pointerup share it as an
@@ -2435,9 +2623,11 @@
 
       // The engine's own dialogs are not the playfield. Dismissing the shame box
       // used to cost the player a miss and an error chord for a dialog the game
-      // put in front of them.
+      // put in front of them. Folder windows ride the same rule: opening one
+      // was the miss; closing it must not be another.
       if (shameBox.contains(e.target) || overlay.contains(e.target) ||
-          pauseBox.contains(e.target) || banBox.contains(e.target)) return;
+          pauseBox.contains(e.target) || banBox.contains(e.target) ||
+          (deskWins && deskWins.contains(e.target))) return;
 
       // A press that failed the presence gate already counted as a miss. Whatever
       // click it produces, and wherever that click retargets to, must not count
@@ -2484,6 +2674,13 @@
           if (!aimJourneyOK()) {
             showTaunt(TAUNT_TELEPORT);
             addMiss('aim-journey');
+            return;
+          }
+          /* V4.0: an open folder window outranks the X. A miss like any other
+             refused press, and the shot clock keeps charging the detour. */
+          if (foldersOpen > 0) {
+            showTaunt(TAUNT_FOLDER);
+            addMiss('folder-open');
             return;
           }
           if (!captchaComplete()) {
@@ -3302,6 +3499,7 @@
     lastT = NOW();
     simT = lastT;
     checkPlayable();
+    seedFolders();
     /* Ruling 1: the clock starts when the Chase does. Simulation's mandatory
        visual challenge lives between Flappy and Chase, so it is displayed now
        and startTimer() is deferred until its success beat closes the dialog.

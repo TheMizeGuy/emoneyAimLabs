@@ -11,7 +11,24 @@ const { CHALLENGE_ROUNDS } = require('./challenge');
 // is truth. A claim is accepted only when the server witnessed a run that could
 // plausibly have produced it.
 
-const MODES = Object.freeze(['practice', 'simulation']);
+const MODES = Object.freeze(['practice', 'simulation', 'impossible']);
+
+// Modes that play the bird gauntlet before Chase and complete their visual
+// challenge between the two. Practice opens at Chase start and is the odd one
+// out; Impossible is Simulation with a crueler Chase, so every server-side
+// timing rule treats them identically - including the 60 s shot-clock ceiling,
+// which both clients enforce.
+const GAUNTLET_MODES = Object.freeze(['simulation', 'impossible']);
+
+function hasGauntlet(mode) {
+  return GAUNTLET_MODES.includes(mode);
+}
+
+// The shortest server-observed gauntlet phase an honest client can produce,
+// per mode. Impossible's clients play the same pipes 20 percent faster.
+function minFlappyPhaseMs(mode) {
+  return mode === 'impossible' ? LIMITS.MIN_FLAPPY_PHASE_IMP_MS : LIMITS.MIN_FLAPPY_PHASE_MS;
+}
 
 // Client-reported cosmetic events. Nothing on the leaderboard depends on these:
 // a flappy death is a vanity counter, a ban is flavour text on a run that the
@@ -39,6 +56,12 @@ const LIMITS = Object.freeze({
   // under four seconds for a cold run-registration response to land after the
   // local gauntlet has already started.
   MIN_FLAPPY_PHASE_MS: 12000,
+  // Impossible runs its gauntlet at 1.2x, so the physics floor lands at
+  // 15.922/1.2 = 13.268 s. Simulation's floor concedes 3.922 s of that kind of
+  // slack (15.922 - 12.000) to a cold run-registration response; conceding the
+  // same here gives 13.268 - 3.922 = 9.346 s, rounded down so the faster mode
+  // is never the one with the tighter honest-latency margin.
+  MIN_FLAPPY_PHASE_IMP_MS: 9300,
   // Nobody grinds the gauntlet longer than this in one sitting.
   MAX_FLAPPY_PHASE_MS: 30 * 60 * 1000,
   // Claimed time can never exceed the chase phase the server timed, plus a
@@ -300,7 +323,7 @@ function verifyWinSignature(claim, salt = DEFAULT_WIN_SIG_SALT) {
 //   11. insufficient_liveness - too few phase-specific credited heartbeats for
 //       the windows the server timed, or a most-recent beat too old to be live
 //   12. below_floor          - faster than the mode's physical floor
-//   13. above_sim_ceiling    - simulation claim past the 60 s shot clock
+//   13. above_sim_ceiling    - gauntlet-mode claim past the 60 s shot clock
 function validateRunForScore(input) {
   const { run, userId, nowMs, timeMs, floors } = input;
 
@@ -322,8 +345,8 @@ function validateRunForScore(input) {
   }
   const flappyPhaseMs = run.chaseStartedAtMs - run.issuedAtMs;
   if (flappyPhaseMs < 0) return { ok: false, code: 'chase_not_started' };
-  if (run.mode === 'simulation') {
-    if (flappyPhaseMs < LIMITS.MIN_FLAPPY_PHASE_MS) {
+  if (hasGauntlet(run.mode)) {
+    if (flappyPhaseMs < minFlappyPhaseMs(run.mode)) {
       return { ok: false, code: 'flappy_phase_too_short', detail: { flappyPhaseMs } };
     }
     if (flappyPhaseMs > LIMITS.MAX_FLAPPY_PHASE_MS) {
@@ -386,7 +409,7 @@ function validateRunForScore(input) {
     const challengeOffsetMs = run.challengeStartedAtMs - run.issuedAtMs;
     const challengeToChaseMs = run.chaseStartedAtMs - run.challengeSolvedAtMs;
     if (
-      challengeOffsetMs < LIMITS.MIN_FLAPPY_PHASE_MS
+      challengeOffsetMs < minFlappyPhaseMs(run.mode)
       || challengeToChaseMs < 0
       || challengeToChaseMs > LIMITS.MAX_CHALLENGE_TO_CHASE_MS
     ) return { ok: false, code: 'challenge_required' };
@@ -428,7 +451,7 @@ function validateRunForScore(input) {
   // The clamp and freshness rule are liveness evidence, not proof of skill.
   const beatWindowMs = Math.min(scoredChasePhaseMs, timeMs + LIMITS.ELAPSED_TOLERANCE_MS);
   const needed = requiredBeats(beatWindowMs);
-  const chaseStartBeats = run.mode === 'simulation' ? run.chaseStartBeats : 0;
+  const chaseStartBeats = hasGauntlet(run.mode) ? run.chaseStartBeats : 0;
   const chaseBeats = run.beats - chaseStartBeats;
   if (!Number.isInteger(chaseBeats) || chaseBeats < needed) {
     return {
@@ -456,7 +479,7 @@ function validateRunForScore(input) {
   if (!Number.isFinite(floorMs)) return { ok: false, code: 'invalid_mode' };
   if (timeMs < floorMs) return { ok: false, code: 'below_floor', detail: { floorMs } };
 
-  if (run.mode === 'simulation' && timeMs > LIMITS.SIM_CEILING_MS) {
+  if (hasGauntlet(run.mode) && timeMs > LIMITS.SIM_CEILING_MS) {
     return { ok: false, code: 'above_sim_ceiling', detail: { ceilingMs: LIMITS.SIM_CEILING_MS } };
   }
 
@@ -472,6 +495,7 @@ function beatCounts(lastBeatAtMs, nowMs) {
 
 module.exports = {
   MODES,
+  GAUNTLET_MODES,
   EVENT_TYPES,
   BAN_REASONS,
   LIMITS,
@@ -479,6 +503,8 @@ module.exports = {
   newRunToken,
   isRunToken,
   isMode,
+  hasGauntlet,
+  minFlappyPhaseMs,
   isTwitchId,
   requiredBeats,
   parseRunBody,

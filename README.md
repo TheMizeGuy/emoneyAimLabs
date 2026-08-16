@@ -1,9 +1,9 @@
 # eMoney Aim Labs
 
 A browser game that exists to make you angry at a popup ad. The start
-screen offers two modes. Pick one and go make yourself miserable.
+screen offers three modes. Pick one and go make yourself miserable.
 
-Simulation mode plays loud audio. Turn your volume down before you start it.
+Simulation and Impossible both play loud audio. Turn your volume down first.
 A mouse is required to win: touch and pen can play, but only a real mouse
 click closes the window.
 
@@ -32,8 +32,16 @@ different face on the run and an 8-second audio loop playing at full
 volume for the rest of the round. The visual verification runs between Flappy
 and Chase, and the popup then spawns at a fresh random position.
 
-Every missed click in Simulation triggers its own synthesized
-Windows-error chord, mixed under the loop. Practice Mode is silent.
+**Impossible (LOUD!)** - Simulation with the mercy removed. The gauntlet
+runs 20 percent faster, the window is meaningfully harder to pin down,
+and the desktop is scattered with folders. Clicking a folder counts as a
+miss and opens an empty Explorer window somewhere else on the desktop,
+which has to be closed before the popup will accept its fate. It has its
+own leaderboard.
+
+Every missed click in Simulation and Impossible triggers its own
+synthesized Windows-error chord, mixed under the loop. Practice Mode is
+silent.
 
 ## Fair play
 
@@ -55,7 +63,7 @@ the detailed threat model and current residual are in `docs/anti-cheat-audit.md`
 ## Leaderboard
 
 Sign in with Twitch on the start screen to post your times. The LEADERBOARD tab
-shows the top 50 for each mode, with each player's click count and three failure
+shows the top 50 for Simulation and for Impossible, with each player's click count and three failure
 tallies: total, deaths in the gauntlet, and windows that got away. Anyone can
 read it, signed in or not. Play without signing in and everything works exactly
 the same; your time just does not get posted.
@@ -89,14 +97,14 @@ since sign-in only works from the published site.
 ## Repo layout
 
 - `index.html` - the shell: start screen, mode router, loads the scripts.
-- `js/chase.js` - the chase engine shared by both modes.
-- `js/flappy.js` - the Flappy-style gauntlet in Simulation mode.
+- `js/chase.js` - the chase engine shared by all three modes.
+- `js/flappy.js` - the Flappy-style gauntlet in Simulation and Impossible.
 - `js/main.js` - wiring between the start screen and the game modes.
 - `js/sentinel.js` - build integrity check.
 - `js/net.js` - leaderboard and sign-in client.
 - `assets/emoney.png` - the Practice Mode target.
-- `assets/simulation.png` - the Simulation Mode target.
-- `assets/loop.wav` - the Simulation Mode audio loop.
+- `assets/simulation.png` - the Simulation and Impossible target.
+- `assets/loop.wav` - the Simulation and Impossible audio loop.
 - `server/` - the leaderboard API: Twitch sign-in, score validation and
   the activity feed. Node and Postgres, deployed separately. Its secrets
   live in the host's environment, never in this repo.

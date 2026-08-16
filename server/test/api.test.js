@@ -545,6 +545,49 @@ test('legitimate runs at and around the floors are accepted', async (t) => {
   assert.equal(await ctx.store.countRejections(), 0, 'honest play leaves no audit trail');
 });
 
+// V4.0: the whole request path for the third mode -- open, 1.2x-paced gauntlet,
+// pre-chase challenge, chase beats, score, board row -- not just the pure
+// validator the unit tests cover.
+test('impossible runs travel the full path onto their own board', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'honest');
+  const client = ctx.clientFor('1');
+
+  const won = await playRun(ctx, client, 'impossible', 20000, { flappyMs: 14000 });
+  assert.equal(won.submitted.status, 200, JSON.stringify(won.submitted.json));
+  assert.equal(won.submitted.json.mode, 'impossible');
+
+  // Its own board, never simulation's.
+  const board = await client.get('/api/leaderboard?mode=impossible');
+  assert.equal(board.status, 200);
+  assert.equal(board.json.entries.length, 1);
+  assert.equal(board.json.entries[0].timeMs, 20000);
+  assert.equal((await client.get('/api/leaderboard?mode=simulation')).json.entries.length, 0);
+});
+
+test('an impossible gauntlet under the 1.2x phase floor is refused', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'honest');
+  const client = ctx.clientFor('1');
+
+  const tooFast = await playRun(ctx, client, 'impossible', 20000, {
+    flappyMs: LIMITS.MIN_FLAPPY_PHASE_IMP_MS - 1,
+  });
+  assert.equal(tooFast.submitted.status, 400);
+  assert.equal(tooFast.submitted.json.error, 'flappy_phase_too_short');
+
+  // The same phase would already have failed simulation's higher floor by more;
+  // a phase legal for impossible but short of simulation's floor stays refused
+  // there. Distinct floors, one rule.
+  const simShort = await playRun(ctx, client, 'simulation', 20000, {
+    flappyMs: LIMITS.MIN_FLAPPY_PHASE_IMP_MS + 200,
+  });
+  assert.equal(simShort.submitted.status, 400);
+  assert.equal(simShort.submitted.json.error, 'flappy_phase_too_short');
+});
+
 test('the server accepts a 400 ms Chase while 399 ms remains below the floor', async (t) => {
   const ctx = await createContext({
     env: { FLOOR_PRACTICE_MS: '400', FLOOR_SIM_MS: '400' },
@@ -1722,11 +1765,12 @@ test('the stats board lists every player with their public numbers', async (t) =
   assert.equal(fell.flappyFails, 1);
   assert.equal(fell.wins, 0);
   assert.equal(fell.bestPracticeMs, null);
+  assert.equal(fell.bestImpMs, null);
 
   // Only board-public fields travel: no login, no epochs, nothing internal.
   assert.deepEqual(Object.keys(won).sort(), [
-    'avatarUrl', 'bestPracticeMs', 'bestSimMs', 'chaseFails', 'displayName',
-    'flappyFails', 'totalFails', 'userId', 'wins',
+    'avatarUrl', 'bestImpMs', 'bestPracticeMs', 'bestSimMs', 'chaseFails',
+    'displayName', 'flappyFails', 'totalFails', 'userId', 'wins',
   ]);
 });
 

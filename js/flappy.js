@@ -7,6 +7,8 @@
  * Public API:
  *   var handle = window.AimlabFlappy.start(container, {
  *     targetScore: 10,
+ *     speedScale: 1,        // V4.0: Impossible runs the whole game at 1.2x
+ *     title: 'SIMULATION',  // V4.0: the get-ready card names the mode
  *     onComplete: function () {}
  *   });
  *   handle.stop();
@@ -575,6 +577,14 @@
        flappy-fail counter. Guarded exactly like onComplete -- a throwing caller
        must never wedge the loop. */
     var onDeath = typeof opts.onDeath === 'function' ? opts.onDeath : null;
+    /* V4.0: one uniform time scale over the simulation -- scroll, gravity and
+     * flap response all speed up together, so the game FEELS identical, just
+     * quicker. Clamped: below 1 would make the gauntlet easier than the server
+     * assumes when it times the phase, and past 2 it is not a game. */
+    var speedScale = (typeof opts.speedScale === 'number' && isFinite(opts.speedScale))
+      ? Math.min(2, Math.max(1, opts.speedScale)) : 1;
+    var title = (typeof opts.title === 'string' && opts.title)
+      ? opts.title.toUpperCase() : 'SIMULATION';
 
     var doc = container.ownerDocument || document;
     var win = doc.defaultView || window;
@@ -834,6 +844,7 @@
     }
 
     function advance(dt) {
+      dt *= speedScale;      // V4.0: everything downstream runs on scaled time
       clock += dt;
       view.tiltHold = Math.max(0, view.tiltHold - dt);
 
@@ -951,7 +962,7 @@
       }
 
       if (state === 'getready') {
-        label(ctx, 'SIMULATION', W / 2, 142, 26, '#f2c14e', 5, '#10151f');
+        label(ctx, title, W / 2, 142, 26, '#f2c14e', 5, '#10151f');
         label(ctx, 'TAP TO START', W / 2, 244, 22, '#ffffff', 5, '#10151f');
         var pulse = 0.55 + 0.45 * Math.sin(view.bob * 4);
         ctx.globalAlpha = pulse;
@@ -984,7 +995,7 @@
       if (state === 'complete') {
         drawVignette(ctx, 0.5);
         drawCard(ctx, 34, 196, 220, 96);
-        label(ctx, 'SIMULATION READY', W / 2, 228, 19, '#6fe3a5', 4, '#10151f');
+        label(ctx, title + ' READY', W / 2, 228, 19, '#6fe3a5', 4, '#10151f');
         label(ctx, 'TARGET REACHED  -  ' + shScore.get() + ' / ' + targetScore,
           W / 2, 258, 11, 'rgba(214, 228, 242, 0.82)', 0, '');
       }

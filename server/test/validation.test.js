@@ -29,7 +29,7 @@ const { TEST_ENV } = require('./helpers');
 
 const RUN_ID = newRunToken();
 const CHAIN = 'a'.repeat(32);
-const FLOORS = { practice: 8000, simulation: 15000 };
+const FLOORS = { practice: 8000, simulation: 15000, impossible: 12000 };
 
 function baseRun(overrides = {}) {
   const run = {
@@ -49,7 +49,7 @@ function baseRun(overrides = {}) {
     failed: false,
     ...overrides,
   };
-  if (run.mode === 'simulation') {
+  if (run.mode === 'simulation' || run.mode === 'impossible') {
     if (!Object.hasOwn(overrides, 'challengeStartedAtMs')) {
       run.challengeStartedAtMs = Math.max(
         run.issuedAtMs + LIMITS.MIN_FLAPPY_PHASE_MS,
@@ -140,6 +140,7 @@ test('every legitimate cadence clears the liveness bar', () => {
 
 test('parseRunBody validates mode', () => {
   assert.deepEqual(parseRunBody({ mode: 'simulation' }), { ok: true, value: { mode: 'simulation' } });
+  assert.deepEqual(parseRunBody({ mode: 'impossible' }), { ok: true, value: { mode: 'impossible' } });
   assert.equal(parseRunBody({ mode: 'nope' }).code, 'invalid_mode');
   assert.equal(parseRunBody(null).code, 'invalid_body');
   assert.equal(parseRunBody([]).code, 'invalid_body');
@@ -595,6 +596,54 @@ test('score validation rejects a run with an unknown mode', () => {
   assert.equal(check(baseRun({ mode: 'sandbox' }), 20000, 21000).code, 'invalid_mode');
 });
 
+test('impossible shares simulation rules except its floor knob and 1.2x gauntlet minimum', () => {
+  const issuedAtMs = 1000000;
+  const imp = () => baseRun({
+    mode: 'impossible', issuedAtMs, chaseStartedAtMs: issuedAtMs + 20000, chaseStartBeats: 4,
+  });
+
+  // Its own floor knob, not simulation's. The offset keeps the claim inside
+  // the two-sided elapsed window, so the floor is the check that answers.
+  assert.equal(check(imp(), 11999, 13000).code, 'below_floor');
+  assert.equal(check(imp(), 12000, 13000).ok, true);
+
+  // The shared 60 s shot-clock ceiling.
+  assert.equal(check(imp(), 61000, 62000).ok, true);
+  assert.equal(check(imp(), 61001, 62000).code, 'above_sim_ceiling');
+
+  // The gauntlet cannot be skipped, and its beats cannot vouch for Chase.
+  const skipped = baseRun({
+    mode: 'impossible',
+    issuedAtMs,
+    chaseStartedAtMs: issuedAtMs + LIMITS.MIN_FLAPPY_PHASE_IMP_MS - 1,
+    chaseStartBeats: 4,
+  });
+  assert.equal(check(skipped, 20000, 21000).code, 'flappy_phase_too_short');
+  const frontLoaded = imp();
+  frontLoaded.chaseStartBeats = 0;
+  assert.equal(check(frontLoaded, 20000, 21000).code, 'insufficient_liveness');
+
+  // Its 1.2x gauntlet has a lower phase floor than simulation's: a phase that
+  // simulation would refuse as too short is legal here.
+  const quick = baseRun({
+    mode: 'impossible',
+    issuedAtMs,
+    chaseStartedAtMs: issuedAtMs + 11500,
+    chaseStartBeats: 4,
+    challengeStartedAtMs: issuedAtMs + LIMITS.MIN_FLAPPY_PHASE_IMP_MS,
+    challengeSolvedAtMs: issuedAtMs + LIMITS.MIN_FLAPPY_PHASE_IMP_MS
+      + LIMITS.MIN_CHALLENGE_SOLVE_MS,
+  });
+  assert.equal(check(quick, 12500, 13000).ok, true);
+  const simQuick = baseRun({
+    mode: 'simulation',
+    issuedAtMs,
+    chaseStartedAtMs: issuedAtMs + 11500,
+    chaseStartBeats: 4,
+  });
+  assert.equal(check(simQuick, 15500, 16000).code, 'flappy_phase_too_short');
+});
+
 test('beat spacing rule', () => {
   assert.equal(beatCounts(null, 1000), true);
   assert.equal(beatCounts(1000, 1000 + LIMITS.MIN_BEAT_SPACING_MS), true);
@@ -697,7 +746,8 @@ test('config rejects weak or missing settings and normalises origins', () => {
   assert.equal(config.gameOrigin, 'https://themizeguy.github.io');
   assert.equal(config.gameReturnUrl, 'https://themizeguy.github.io/emoneyAimLabs/');
   assert.equal(config.redirectUri, 'https://api.example.test/auth/twitch/callback');
-  assert.deepEqual(config.floors, { practice: 8000, simulation: 15000 });
+  // FLOOR_IMPOSSIBLE_MS is unset in TEST_ENV, so it takes the 400 ms engine floor.
+  assert.deepEqual(config.floors, { practice: 8000, simulation: 15000, impossible: 400 });
   assert.deepEqual(config.winSigSalts, ['aimlab-95-v2.7']);
   assert.equal(config.winSigStrict, true);
 
@@ -714,6 +764,8 @@ test('config refuses values that would silently weaken anti-cheat or redirect tr
     [{ FLOOR_PRACTICE_MS: '399' }, /Invalid FLOOR_PRACTICE_MS/],
     [{ FLOOR_SIM_MS: '399' }, /Invalid FLOOR_SIM_MS/],
     [{ FLOOR_SIM_MS: '61001' }, /Invalid FLOOR_SIM_MS/],
+    [{ FLOOR_IMPOSSIBLE_MS: '399' }, /Invalid FLOOR_IMPOSSIBLE_MS/],
+    [{ FLOOR_IMPOSSIBLE_MS: '61001' }, /Invalid FLOOR_IMPOSSIBLE_MS/],
     [{ SESSION_TTL_MS: '0' }, /Invalid SESSION_TTL_MS/],
     [{ OAUTH_STATE_TTL_MS: '0' }, /Invalid OAUTH_STATE_TTL_MS/],
     [{ OAUTH_STATE_TTL_MS: '900001' }, /Invalid OAUTH_STATE_TTL_MS/],
@@ -738,13 +790,14 @@ test('config refuses values that would silently weaken anti-cheat or redirect tr
     PORT: '65535',
     FLOOR_PRACTICE_MS: '9000',
     FLOOR_SIM_MS: '16000',
+    FLOOR_IMPOSSIBLE_MS: '17000',
     SESSION_TTL_MS: '60000',
     OAUTH_STATE_TTL_MS: '60000',
     WIN_SIG_STRICT: 'YES',
     WIN_SIG_SALT: ' current , current , previous ',
   });
   assert.equal(config.port, 65535);
-  assert.deepEqual(config.floors, { practice: 9000, simulation: 16000 });
+  assert.deepEqual(config.floors, { practice: 9000, simulation: 16000, impossible: 17000 });
   assert.equal(config.winSigStrict, true);
   assert.deepEqual(config.winSigSalts, ['current', 'previous']);
 
@@ -752,8 +805,9 @@ test('config refuses values that would silently weaken anti-cheat or redirect tr
     ...TEST_ENV,
     FLOOR_PRACTICE_MS: '400',
     FLOOR_SIM_MS: '400',
+    FLOOR_IMPOSSIBLE_MS: '400',
   });
-  assert.deepEqual(engineFloors.floors, { practice: 400, simulation: 400 });
+  assert.deepEqual(engineFloors.floors, { practice: 400, simulation: 400, impossible: 400 });
 
   const localDevelopment = loadConfig({
     ...TEST_ENV,

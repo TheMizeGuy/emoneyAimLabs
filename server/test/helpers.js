@@ -13,7 +13,7 @@ const { createFeed } = require('../feed');
 const { createApp } = require('../app');
 const { loadConfig } = require('../config');
 const { signSession } = require('../session');
-const { LIMITS, winSignatures } = require('../validation');
+const { LIMITS, winSignatures, hasGauntlet } = require('../validation');
 const { expectedAnswers } = require('../challenge');
 
 const TEST_ENV = Object.freeze({
@@ -239,8 +239,8 @@ async function playRun(ctx, client, mode, timeMs, stats = {}) {
   const runId = created.json.runId;
   let chainToken = created.json.chain;
 
-  if (mode === 'simulation') {
-    // Simulation runs open at flappy start, so the gauntlet is played first.
+  if (hasGauntlet(mode)) {
+    // Gauntlet modes open at flappy start, so the gauntlet is played first.
     const flappyMs = stats.flappyMs === undefined ? 20000 : stats.flappyMs;
     const flappyBeats = Math.floor(flappyMs / 5000);
     for (let i = 0; i < flappyBeats; i += 1) {

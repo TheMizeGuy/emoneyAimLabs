@@ -168,6 +168,16 @@ function loadConfig(env = process.env) {
         CONFIG_LIMITS.CHASE_FLOOR_MIN_MS,
         LIMITS.SIM_CEILING_MS,
       ),
+      // Impossible shares Simulation's engine and shot clock; its floor is a
+      // separate knob because its Chase is meant to be slower to finish, but
+      // the 400 ms arming-gate minimum is the same physical fact for both.
+      impossible: intFromEnv(
+        env,
+        'FLOOR_IMPOSSIBLE_MS',
+        CONFIG_LIMITS.CHASE_FLOOR_MIN_MS,
+        CONFIG_LIMITS.CHASE_FLOOR_MIN_MS,
+        LIMITS.SIM_CEILING_MS,
+      ),
     }),
     sessionTtlMs: intFromEnv(
       env,

@@ -574,6 +574,19 @@ test('the record only moves when a run is strictly faster', async () => {
   );
   assert.equal(sim.best.timeMs, 30000);
   assert.equal((await store.getScore('1', 'practice')).timeMs, 12000);
+
+  // V4.0: impossible is a third independent board, and the migrated mode
+  // constraints accept its rows.
+  const impRun = await store.createRun('1', 'impossible', clock.now());
+  await store.stampChaseStart(impRun, clock.now());
+  const imp = await store.submitScore(
+    { runId: impRun, userId: '1', mode: 'impossible', timeMs: 45000, misses: 2, nearMisses: 1 },
+    clock.now(),
+  );
+  assert.equal(imp.ok, true);
+  assert.equal(imp.best.timeMs, 45000);
+  assert.equal((await store.getScore('1', 'simulation')).timeMs, 30000);
+  assert.equal((await store.topScores('impossible', LEADERBOARD_LIMIT)).length, 1);
   await pool.end();
 });
 

@@ -1,11 +1,13 @@
 /* eMoney Aim Labs -- mode router.
 
-   Owns the start screen, the two modes, and the shared AudioContext for
-   simulation. Nothing here knows how either game works; it only wires them:
+   Owns the start screen, the modes, and the shared AudioContext for the loud
+   ones. Nothing here knows how either game works; it only wires them:
 
      Practice    -> AimlabChase with emoney.png, no shared audio.
      Simulation  -> AimlabFlappy to 10 points, then AimlabChase with
                     simulation.png and the 8 s loop.
+     Impossible  -> Simulation's pipeline with the gauntlet at 1.2x, then the
+                    chase at its cruelest (the engine keys off the mode label).
 
    Autoplay policy: the loop.wav bytes are fetched immediately (a plain network
    request needs no permission), but an AudioContext is only ever constructed
@@ -37,7 +39,19 @@
     // 128px-wide Win95 window slightly narrower than Practice's 136px.
     imageW: 120,
     imageH: 49,
-    bestKey: 'emoney-aimlabs-best-sim'
+    bestKey: 'emoney-aimlabs-best-sim',
+    flappySpeed: 1
+  };
+
+  /* V4.0: Simulation's window and gauntlet with the mercy removed. The engine
+     reads the difficulty off the IMPOSSIBLE mode label; this module only picks
+     the assets, the best-time key and the 1.2x gauntlet clock. */
+  var IMPOSSIBLE = {
+    imageSrc: './assets/simulation.png',
+    imageW: 120,
+    imageH: 49,
+    bestKey: 'emoney-aimlabs-best-imp',
+    flappySpeed: 1.2
   };
 
   var startScreen = document.getElementById('startScreen');
@@ -378,7 +392,7 @@
       return Promise.resolve(challengePromise).then(function () {
         if (
           gen === runGen
-          && running === 'simulation'
+          && (running === 'simulation' || running === 'impossible')
           && (challengeVerified || challengeUnranked)
         ) return markChaseStarted();
         return null;
@@ -684,7 +698,7 @@
           if (typeof r.bestMs === 'number') note += '   best ' + fmtMs(r.bestMs);
           chase.winExtras({
             note: note,
-            onBoard: function () { openModal(); }
+            onBoard: function () { openModal(stats.mode); }
           });
         });
       });
@@ -757,12 +771,19 @@
     });
   }
 
-  function startSimulation(fromGesture) {
+  function startSimulation(fromGesture) { startGauntlet('simulation', fromGesture); }
+  function startImpossible(fromGesture) { startGauntlet('impossible', fromGesture); }
+
+  /* V4.0: Simulation and Impossible share one shape -- a witnessed run from
+     flappy start, the audio loop, the gauntlet, then the chase. The mode picks
+     the assets, the gauntlet speed and the engine's difficulty label. */
+  function startGauntlet(mode, fromGesture) {
     if (running) return;
-    running = 'simulation';
+    running = mode;
+    var cfg = (mode === 'impossible') ? IMPOSSIBLE : SIMULATION;
     startScreen.classList.add('hide');
-    LOG('[AIMLAB] MODE mode=simulation');
-    beginRun('simulation');          // V3.3: witnessed from the gauntlet onward
+    LOG('[AIMLAB] MODE mode=' + mode);
+    beginRun(mode);                  // V3.3: witnessed from the gauntlet onward
     fetchLoop();
 
     if (fromGesture) ensureContext();   // the mode button click is the gesture
@@ -771,6 +792,8 @@
     if (!skipFlappy && window.AimlabFlappy && window.AimlabFlappy.start) {
       flappy = window.AimlabFlappy.start(stage, {
         targetScore: TARGET_SCORE,
+        speedScale: cfg.flappySpeed,
+        title: mode,
         // V3.2: a vanity counter, fire-and-forget. Never on a seam run, and
         // net.js ignores it entirely when signed out or offline.
         onDeath: function () {
@@ -784,16 +807,16 @@
           try { if (flappy && flappy.stop) flappy.stop(); }
           catch (e) { ERR('[AIMLAB] flappy stop threw: ' + (e && e.message)); }
           flappy = null;
-          startSimChase(info);
+          startGauntletChase(mode, cfg, info);
         }
       });
       return;
     }
 
     /* Starting the chase anyway was a doomed run: beginRun has already opened a
-       server-witnessed one, and a Simulation win with no gauntlet behind it is
-       refused with flappy_phase_too_short -- so an honest player got a fail row
-       on their record for a script that failed to load. startChase's own
+       server-witnessed one, and a gauntlet-mode win with no gauntlet behind it
+       is refused with flappy_phase_too_short -- so an honest player got a fail
+       row on their record for a script that failed to load. startChase's own
        equivalent failure puts the menu back; so does this one. ?skipflappy=1 is
        the QA seam and means it on purpose. */
     if (!skipFlappy) {
@@ -801,18 +824,18 @@
       failToMenu();
       return;
     }
-    startSimChase(null);
+    startGauntletChase(mode, cfg, null);
   }
 
-  function startSimChase(info) {
+  function startGauntletChase(mode, cfg, info) {
     chase = startChase({
-      imageSrc: SIMULATION.imageSrc,
-      imageW: SIMULATION.imageW,
-      imageH: SIMULATION.imageH,
-      bestKey: SIMULATION.bestKey,
-      modeLabel: 'SIMULATION',
+      imageSrc: cfg.imageSrc,
+      imageW: cfg.imageW,
+      imageH: cfg.imageH,
+      bestKey: cfg.bestKey,
+      modeLabel: mode.toUpperCase(),
       recordBest: !isSeam,
-      onWin: function (st) { finishRun({ mode: 'simulation', timeMs: st.timeMs,
+      onWin: function (st) { finishRun({ mode: mode, timeMs: st.timeMs,
                                          misses: st.misses, nearMisses: st.nearMisses,
                                          sus: st.sus, sig: st.sig,
                                          cheated: st.cheated }); },
@@ -821,7 +844,7 @@
       challengeBeforeStart: true,
       onChallenge: reportChallenge,
       // V2.14: the ban screen's two buttons come back through here
-      onExit: function (action) { onChaseExit(action, 'simulation'); },
+      onExit: function (action) { onChaseExit(action, mode); },
       onBan: reportBan,
       susSeed: (info && info.sus > 0) ? info.sus : 0,
       stateCheat: !!(info && info.stateCheat),
@@ -848,8 +871,8 @@
     if (action === 'retry') {
       if (mode === 'practice') startPractice();
       else {
-        skipFlappy = false;           // a Simulation retry starts at the gauntlet
-        startSimulation(true);        // the button click is the audio gesture
+        skipFlappy = false;           // a gauntlet-mode retry starts at the gauntlet
+        startGauntlet(mode, true);    // the button click is the audio gesture
       }
       return;
     }
@@ -895,7 +918,10 @@
 
   function feedWords(type, d) {
     if (type === 'run_won') {
-      var t = 'closed the window in ' + secs(d.timeMs);
+      /* The mode with its own board earns its own words; every other win reads
+         as it always has. Older stored lines carry no mode and fall through. */
+      var what = (d.mode === 'impossible') ? 'the impossible window' : 'the window';
+      var t = 'closed ' + what + ' in ' + secs(d.timeMs);
       if (typeof d.clicks === 'number') t += ' (' + d.clicks + ' click' + (d.clicks === 1 ? '' : 's') + ')';
       return t;
     }
@@ -1037,6 +1063,15 @@
     'timeout': 'out of time'
   };
 
+  /* An unknown mode reads as Practice rather than as markup or "undefined";
+     the map keeps a fourth mode from silently wearing the wrong name the way
+     Impossible briefly wore "Practice". */
+  var MODE_WORDS = {
+    practice: 'Practice',
+    simulation: 'Simulation',
+    impossible: 'Impossible'
+  };
+
   /* propStatRow, not statRow: the stats tab (V3.8) declares its own statRow
      in this same scope, and the later declaration wins -- while both carried
      the name, every one of these rows was built and thrown away, and the
@@ -1088,7 +1123,7 @@
 
     var why = document.createElement('span');
     why.className = 'pwhy';
-    var label = (r.mode === 'simulation') ? 'Simulation' : 'Practice';
+    var label = MODE_WORDS[r.mode] || 'Practice';
     if (!won && !open) {
       /* A ban names itself; anything else is placed by the phase the server
          stamped, so an abandoned gauntlet does not read the same as an
@@ -1129,6 +1164,7 @@
     var best = p.best || {};
     propStatRow('Best (Practice)', bestText(bestMsOf(best.practice, p.bestPractice)), true);
     propStatRow('Best (Simulation)', bestText(bestMsOf(best.simulation, p.bestSimulation)), true);
+    propStatRow('Best (Impossible)', bestText(bestMsOf(best.impossible)), true);
     propStatRow('Runs', num(runs));
     propStatRow('Wins', num(wins));
     propStatRow('Fails', num(fails));
@@ -1212,6 +1248,31 @@
   var statsList = document.getElementById('statsList');
   var statsStatus = document.getElementById('statsStatus');
 
+  /* V4.0: which of the two boards the panel is showing. The pair of toggle
+     buttons above the list flips it; the tab re-render keeps whatever the
+     visitor last picked. */
+  var boardMode = 'simulation';
+  var bmSim = document.getElementById('bmSim');
+  var bmImp = document.getElementById('bmImp');
+
+  function setBoardMode(m) {
+    boardMode = m;
+    if (bmSim) {
+      bmSim.classList.toggle('on', m === 'simulation');
+      bmSim.setAttribute('aria-pressed', String(m === 'simulation'));
+    }
+    if (bmImp) {
+      bmImp.classList.toggle('on', m === 'impossible');
+      bmImp.setAttribute('aria-pressed', String(m === 'impossible'));
+    }
+    renderBoard(boardList, m, boardStatus, boardReq);
+  }
+
+  if (bmSim && bmImp) {
+    bmSim.addEventListener('click', function () { setBoardMode('simulation'); });
+    bmImp.addEventListener('click', function () { setBoardMode('impossible'); });
+  }
+
   function showTab(which) {
     var board = (which === 'board');
     var stats = (which === 'stats');
@@ -1221,7 +1282,7 @@
     panelGame.classList.toggle('hide', board || stats);
     panelBoard.classList.toggle('hide', !board);
     panelStats.classList.toggle('hide', !stats);
-    if (board) renderBoard(boardList, 'simulation', boardStatus, boardReq);
+    if (board) renderBoard(boardList, boardMode, boardStatus, boardReq);
     if (stats) loadStats();
   }
 
@@ -1264,6 +1325,7 @@
     row.appendChild(statCell(num(p.totalFails), 'stnumcol'));
     row.appendChild(statCell(typeof p.bestPracticeMs === 'number' ? secs(p.bestPracticeMs) : '--', 'sttimecol'));
     row.appendChild(statCell(typeof p.bestSimMs === 'number' ? secs(p.bestSimMs) : '--', 'sttimecol'));
+    row.appendChild(statCell(typeof p.bestImpMs === 'number' ? secs(p.bestImpMs) : '--', 'sttimecol'));
     return row;
   }
 
@@ -1333,10 +1395,19 @@
     });
   }
 
-  // the modal, used by the win dialog's View leaderboard button
-  function openModal() {
+  // The modal, used by the win dialog's View leaderboard button. It shows the
+  // board of the mode that was just played; anything unranked (practice
+  // included) falls back to simulation, as it always has.
+  var lbModalCap = document.getElementById('lbModalCap');
+
+  function openModal(mode) {
+    var m = (mode === 'impossible') ? 'impossible' : 'simulation';
+    if (lbModalCap) {
+      lbModalCap.textContent = (m === 'impossible')
+        ? 'Impossible runs only' : 'Simulation runs only';
+    }
     lbBox.classList.remove('hide');
-    renderBoard(lbList, 'simulation', lbStatus, modalReq);
+    renderBoard(lbList, m, lbStatus, modalReq);
   }
 
   if (tabGame) {
@@ -1444,13 +1515,17 @@
   var mode = q.mode;
   var skipFlappy = (q.skipflappy === '1');
   // A seam run plays exactly like a real one but never writes a best time (V2.6 layer 8).
-  var isSeam = (mode === 'practice' || mode === 'simulation' || skipFlappy);
+  var isSeam = (mode === 'practice' || mode === 'simulation'
+                || mode === 'impossible' || skipFlappy);
 
   if (isSeam) LOG('[AIMLAB] QA SEAM USED');
 
   document.getElementById('btnPractice').addEventListener('click', startPractice);
   document.getElementById('btnSimulation').addEventListener('click', function () {
     startSimulation(true);
+  });
+  document.getElementById('btnImpossible').addEventListener('click', function () {
+    startImpossible(true);
   });
 
   /* V3.5. The activity log is on the landing tab, so it opens itself -- the
@@ -1480,4 +1555,5 @@
 
   if (mode === 'practice') startPractice();
   else if (mode === 'simulation') startSimulation(false);
+  else if (mode === 'impossible') startImpossible(false);
 })();

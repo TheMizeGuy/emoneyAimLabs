@@ -208,7 +208,8 @@
     return request.then(function (revoked) { return revoked === true; });
   }
 
-  /* mode: 'practice' | 'simulation'. Resolves to {runId, nonce, chain}, or null.
+  /* mode: 'practice' | 'simulation' | 'impossible'.
+     Resolves to {runId, nonce, chain}, or null.
      V3.4: the server opens the run with a nonce and a genesis chain token; the
      caller carries both through the heartbeats below. */
   function startRun(mode) {

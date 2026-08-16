@@ -4,6 +4,7 @@ const express = require('express');
 const {
   LIMITS,
   isMode,
+  minFlappyPhaseMs,
   isTwitchId,
   parseRunBody,
   parseBeatBody,
@@ -121,7 +122,7 @@ const MESSAGE_BY_CODE = Object.freeze({
   time_below_elapsed: 'The time claimed is shorter than the server-observed run',
   insufficient_liveness: 'That run was not held open long enough to have been played',
   below_floor: 'That time is below the fastest this mode can honestly be finished',
-  above_sim_ceiling: 'That time is longer than the simulation shot clock allows',
+  above_sim_ceiling: 'That time is longer than the shot clock allows',
   time_out_of_range: 'The time submitted is not a number this game can produce',
   stats_out_of_range: 'The click and miss counters are not numbers this game can produce',
   client_flagged: 'The game flagged interference during that run, so it was not counted',
@@ -568,7 +569,7 @@ function createApiRouter(deps) {
             if (
               run.chaseStartedAtMs !== null
               || !Number.isFinite(flappyMs)
-              || flappyMs < LIMITS.MIN_FLAPPY_PHASE_MS
+              || flappyMs < minFlappyPhaseMs(run.mode)
               || flappyMs > LIMITS.MAX_FLAPPY_PHASE_MS
             ) return fail(req, res, 'challenge_wrong_phase');
           }
