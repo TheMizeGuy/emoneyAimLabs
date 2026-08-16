@@ -16,7 +16,7 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "ce933ae1247e3b28d546c32bdc22b55dc9c449da313a627babba70b233cc9313",
+  "js/chase.js": "40192f11c3b73568a53281d4feca3bfa07c78688e76f76528c1953ccc1e500fa",
   "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
   "js/main.js": "bb045cbbfec923513a51fc2a58b9fbed1b58829644dd4a0140bbe6ea32af0eb2"
 }
@@ -89,6 +89,7 @@
 
   /* ---- SHELL: start screen ------------------------------------------- */
 
+  /* V2.18: the desktop, not a dark range. Flat teal, same token as the chase. */
   .start {
     position: fixed;
     inset: 0;
@@ -96,156 +97,182 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
-    background: var(--bg);
+    padding: 24px 24px 52px;
+    background: var(--w95-desk);
     cursor: default;
+    overflow: auto;
   }
 
   .start.hide { display: none; }
 
-  /* graph-paper playfield, faded out toward the edges */
-  .start::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background-image:
-      linear-gradient(rgba(126, 148, 184, 0.055) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(126, 148, 184, 0.055) 1px, transparent 1px);
-    background-size: 34px 34px, 34px 34px;
-    -webkit-mask-image: radial-gradient(125% 105% at 50% 44%, #000 28%, transparent 80%);
-    mask-image: radial-gradient(125% 105% at 50% 44%, #000 28%, transparent 80%);
-  }
-
-  /* faint range rings, like a target lane */
-  .start::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    background-image: repeating-radial-gradient(
-      circle at 50% 44%,
-      transparent 0 129px,
-      rgba(120, 178, 235, 0.05) 129px 130px
-    );
-  }
-
+  /* the start card is a Win95 window: two-step bevel, navy caption */
   .startcard {
     position: relative;
     z-index: 1;
     width: min(520px, 100%);
-    padding: 24px 24px 20px;
-    border: 1px solid var(--line-2);
-    border-radius: 4px;
-    background: var(--panel);
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-hilite) var(--w95-dark) var(--w95-dark) var(--w95-hilite);
+    box-shadow: inset 2px 2px 0 var(--w95-light), inset -2px -2px 0 var(--w95-shadow);
+    color: #000;
   }
+
+  .startbar {
+    display: flex;
+    align-items: center;
+    height: 30px;
+    margin: 3px 3px 0;
+    padding: 0 8px;
+    background: var(--w95-title);
+  }
+
+  .startbartitle {
+    font-family: var(--w95);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    color: #fff;
+  }
+
+  .startbody { padding: 16px 18px 18px; }
 
   /* ---- hero ---- */
 
   .hero {
-    margin: 0 0 22px;
-    padding: 0 0 20px;
-    border-bottom: 1px solid var(--line);
+    margin: 0 0 16px;
+    padding: 0 0 16px;
+    border-bottom: 1px solid var(--w95-shadow);
+    box-shadow: 0 1px 0 var(--w95-light);
     text-align: center;
   }
 
   .herotitle {
     margin: 0;
-    font-family: var(--mono);
-    font-size: 21px;
-    font-weight: 600;
+    font-family: var(--w95);
+    font-size: 20px;
+    font-weight: 700;
     line-height: 1.25;
-    letter-spacing: 0.02em;
-    color: var(--ink);
+    color: #000;
   }
 
   .herotag {
-    margin: 8px 0 16px;
+    margin: 6px 0 14px;
+    font-family: var(--w95);
     font-size: 12.5px;
-    line-height: 1.45;
-    letter-spacing: 0.04em;
-    color: var(--accent);
+    line-height: 1.4;
+    color: #000080;
+  }
+
+  /* the clip sits in a sunken bevel, the way a Win95 preview pane would */
+  .heroframe {
+    display: inline-block;
+    max-width: 100%;
+    padding: 2px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #000;
+    line-height: 0;
   }
 
   .heroclip {
     display: block;
     width: 440px;
-    max-width: 90vw;
+    max-width: 100%;
     height: auto;
-    margin: 0 auto;
-    border: 1px solid var(--line-2);
-    border-radius: 3px;
-    background: #000;
-  }
-
-  .startkicker {
-    margin: 0;
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.18em;
-    text-transform: uppercase;
-    color: var(--muted);
   }
 
   .starttitle {
-    margin: 9px 0 0;
-    font-family: var(--mono);
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 0.16em;
+    margin: 0;
+    font-family: var(--w95);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--ink);
+    color: #000;
   }
 
   .startpitch {
-    margin: 9px 0 12px;
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--muted);
+    margin: 6px 0 16px;
+    font-family: var(--w95);
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: #3d3d3d;
   }
 
-  /* V2.7 item 1: said up front, because a phone player can chase the window all
-     day and never be allowed to close it. */
-  .startreq {
-    margin: 0 0 22px;
-    padding: 8px 10px;
-    border-left: 2px solid var(--accent);
-    background: rgba(255, 192, 97, 0.06);
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: var(--ink);
-  }
+  /* ---- classic beveled buttons ---- */
 
   .mode {
     display: block;
     width: 100%;
-    padding: 12px 14px;
-    border: 1px solid var(--line-2);
-    border-radius: 3px;
-    background: var(--panel-2);
-    color: var(--ink);
-    font-family: var(--mono);
-    font-size: 13px;
-    letter-spacing: 0.06em;
-    text-align: left;
+    padding: 10px 14px;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    border-radius: 0;
+    box-shadow: inset 2px 2px 0 var(--w95-hilite), inset -2px -2px 0 var(--w95-shadow);
+    color: #000;
+    font-family: var(--w95);
+    font-size: 13.5px;
+    font-weight: 700;
+    text-align: center;
     cursor: pointer;
   }
 
-  .mode:hover { border-color: var(--accent); color: var(--accent); }
-  .mode:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .mode.loud:hover { border-color: var(--danger); color: var(--danger); }
-  .mode.loud:focus-visible { outline-color: var(--danger); }
+  .mode:active {
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+    box-shadow: inset 2px 2px 0 var(--w95-shadow), inset -2px -2px 0 var(--w95-hilite);
+  }
+
+  /* the loud one keeps the same gray button, but its label carries the warning */
+  .mode.loud { color: #7a0000; }
+
+  .mode:focus-visible { outline: 1px dotted #000; outline-offset: -6px; }
 
   .modenote {
-    margin: 7px 2px 16px;
+    margin: 7px 2px 14px;
+    font-family: var(--w95);
     font-size: 11.5px;
     line-height: 1.4;
-    color: var(--muted);
+    color: #3d3d3d;
   }
 
   .modenote.last { margin-bottom: 0; }
-  .modenote.warn { color: var(--danger); }
+
+  /* the loudness warning reads as a Win95 dialog note */
+  .modenote.warn {
+    padding: 7px 9px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #d4d0c8;
+    color: #7a0000;
+    font-weight: 700;
+  }
+
+  /* ---- a slim taskbar, for flavour only ---- */
+  .taskbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    padding: 3px 4px;
+    background: var(--w95-face);
+    border-top: 2px solid var(--w95-light);
+    pointer-events: none;
+  }
+
+  .taskbtn {
+    padding: 3px 12px;
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    box-shadow: inset 1px 1px 0 var(--w95-hilite), inset -1px -1px 0 var(--w95-shadow);
+    font-family: var(--w95);
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #000;
+  }
 
   /* ---- SHELL: where a mode mounts ------------------------------------ */
   /* Fixed and full-bleed so flappy has a viewport-sized box to work in.
@@ -1006,21 +1033,27 @@
 
 <div class="start" id="startScreen">
   <div class="startcard">
-    <div class="hero">
-      <p class="herotitle">Relive the August 14th Incident</p>
-      <p class="herotag">Experience 4DX simulation like never before</p>
-      <img class="heroclip" src="./assets/4dx.avif" alt="simulation footage" width="440" height="320">
+    <div class="startbar"><span class="startbartitle">INCIDENT.EXE</span></div>
+    <div class="startbody">
+      <div class="hero">
+        <p class="herotitle">Relive the August 14th Incident</p>
+        <p class="herotag">Experience 4DX simulation like never before</p>
+        <span class="heroframe">
+          <img class="heroclip" src="./assets/4dx.avif" alt="simulation footage" width="440" height="320">
+        </span>
+      </div>
+
+      <h1 class="starttitle">eMoney Aim Labs</h1>
+      <p class="startpitch">A popup with survival instincts. Land the close button.</p>
+
+      <button class="mode" id="btnPractice" type="button">Practice Mode</button>
+      <p class="modenote">Straight to the chase. Timed, silent, one window between you and a clean desktop.</p>
+
+      <button class="mode loud" id="btnSimulation" type="button">Simulation (LOUD!)</button>
+      <p class="modenote warn last">Warning: this one plays loud audio. Turn your volume down first.</p>
     </div>
-
-    <h1 class="starttitle">eMoney Aim Labs</h1>
-    <p class="startpitch">A popup with survival instincts. Land the close button.</p>
-
-    <button class="mode" id="btnPractice" type="button">Practice Mode</button>
-    <p class="modenote">Straight to the chase. Timed, silent, one window between you and a clean desktop.</p>
-
-    <button class="mode loud" id="btnSimulation" type="button">Simulation (LOUD!)</button>
-    <p class="modenote warn last">Warning: this one plays loud audio. Turn your volume down first.</p>
   </div>
+  <div class="taskbar" aria-hidden="true"><span class="taskbtn">INCIDENT.EXE</span></div>
 </div>
 
 <div class="stage" id="stage"></div>

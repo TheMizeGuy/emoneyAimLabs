@@ -306,14 +306,24 @@
     var SHOCK_BURST_MS  = 600;   // brief burst that stacks with the taunt burst
 
     /* V2.12 -- the captcha interrupt. Simulation only, once per run. */
-    var CAPTCHA_MIN_MS  = 5000;   // earliest the timer path can fire
-    var CAPTCHA_MAX_MS  = 30000;  // latest
+    /* V2.17: recurring. The first captcha lands in this window after the chase
+       starts, and every solve schedules the next one the same way, for the whole
+       simulation chase. */
+    var CAPTCHA_MIN_MS  = 10000;  // earliest the timer path can fire
+    var CAPTCHA_MAX_MS  = 18000;  // latest
     var CAPTCHA_MISS_MIN = 15;    // or this many misses, rolled per run...
     var CAPTCHA_MISS_MAX = 30;    // ...uniform in [MIN, MAX], whichever comes first
     var CAPTCHA_TOL     = 6;      // px the piece must land within
     var CAPTCHA_BEAT_MS = 450;    // success beat before the dialog closes
     var CAPTCHA_LIMIT_MS = 60000; // V2.14: the countdown, and one drop only
     var CAP_W = 260, CAP_H = 150, CAP_PIECE = 46;
+
+    /* V2.16 -- hostile resume. The shield marks the cursor absent so the card
+       wanders while the dialog is up; without this the engine stayed blind until
+       the player's NEXT pointermove, handing them a becalmed card doing idle
+       speed with no accumulated approach velocity to dodge against. */
+    var WAKE_MS    = 500;    // how long the wake-up shove lasts after a resume
+    var WAKE_ACCEL = 9000;   // px/s^2 straight away from the cursor
     var BOUNCE_JITTER      = 10 * Math.PI / 180;
     var PANIC_MS           = 260;
     var PANIC_ACCEL        = 4000;
@@ -548,10 +558,17 @@
 
     /* V2.12 captcha, all closure-local per V2.6 layer 1. */
     var CAPTCHA_ON = (MODE_LABEL === 'SIMULATION');
-    var capFired = false, capShown = false, capAt = 0, capShownAt = 0, capBeatT = 0;
+    var capBroken = false, capShown = false, capAt = Infinity, capShownAt = 0, capBeatT = 0;
+    var capCycle = 0;
     var capMissTarget = 0, capUsed = false, banned = false, capLeftShown = -1;
     var capTX = 0, capTY = 0, capHX = 0, capHY = 0, capPX = 0, capPY = 0;
     var capDrag = false, capDX = 0, capDY = 0, capL = 0, capT = 0;
+    /* Where the pointer is while the playfield is shielded. Deliberately
+       separate from moveT/moveX/moveY: the physics may know where the cursor is,
+       but a drag inside the dialog must never count as presence evidence for a
+       winning press. */
+    var shieldX = 0, shieldY = 0, shieldSeen = false;
+    var wakeUntil = 0;
     var slideSign = 1, slideAt = -1e9, slideHold = SLIDE_HOLD_MIN;
     var baitUntil = 0, jinkUntil = 0, jinkSign = 1, baitCoolUntil = 0;
     var overlapping = false, panicUntil = 0;
@@ -808,10 +825,7 @@
       startWall2 = wall2();
       simT = NOW();
       // V2.12: one captcha per run, at a random instant in [5, 30] s
-      capAt = NOW() + CAPTCHA_MIN_MS + rnd() * (CAPTCHA_MAX_MS - CAPTCHA_MIN_MS);
-      // V2.14: the miss threshold is rolled per run, so it cannot be counted to
-      capMissTarget = CAPTCHA_MISS_MIN +
-        Math.floor(rnd() * (CAPTCHA_MISS_MAX - CAPTCHA_MISS_MIN + 1));
+      scheduleCaptcha(NOW());
       LOG('[AIMLAB] START');
     }
 
@@ -1253,10 +1267,22 @@
       capPiece.style.top = capPY + 'px';
     }
 
+    /* V2.17. Both triggers are re-armed per cycle: a fresh time window, and a
+       fresh miss threshold measured from wherever the counter stands now. */
+    function scheduleCaptcha(now) {
+      if (!CAPTCHA_ON || capBroken) return;
+      capAt = now + CAPTCHA_MIN_MS + rnd() * (CAPTCHA_MAX_MS - CAPTCHA_MIN_MS);
+      capMissTarget = shMisses.get() + CAPTCHA_MISS_MIN +
+        Math.floor(rnd() * (CAPTCHA_MISS_MAX - CAPTCHA_MISS_MIN + 1));
+    }
+
     function showCaptcha(reason) {
-      if (!CAPTCHA_ON || capFired || capShown || won || stopped) return;
-      if (!capBuild()) { capFired = true; return; }   // no canvas, no captcha
-      capFired = true;
+      if (!CAPTCHA_ON || capBroken || capShown || won || stopped || banned) return;
+      if (!capBuild()) { capBroken = true; return; }   // no canvas, no captcha
+      // disarm both triggers for the duration; the solve re-arms them
+      capAt = Infinity;
+      capMissTarget = 0;
+      capCycle++;
       capShown = true;
       capShownAt = NOW();
       capUsed = false;
@@ -1274,6 +1300,18 @@
       capBeatT = NOW() + CAPTCHA_BEAT_MS;
       capPiece.classList.add('solved');
       capBox.classList.add('solved');
+    }
+
+    /* V2.16. Hand the engine the cursor back the instant the dialog closes, so
+       flee is live on the very next sub-step rather than on the player's next
+       mouse movement, and shove the card away once so the resume costs them
+       ground instead of gifting it. setPointer zeroes the smoothed approach
+       velocity, which is correct: nothing was being tracked while shielded. */
+    function resumeFromShield(now) {
+      if (!shieldSeen) return;
+      setPointer(shieldX, shieldY, now);        // hasPointer = true, same frame
+      campX = shieldX; campY = shieldY; campAt = now; cursorParked = false;
+      wakeUntil = now + WAKE_MS;
     }
 
     /* V2.14. A failed verification ends the run: the audio stops, the captcha
@@ -1320,6 +1358,8 @@
         capBox.classList.add('hide');
         capBox.classList.remove('solved');
         capPiece.classList.remove('solved');
+        resumeFromShield(now);
+        scheduleCaptcha(now);            // V2.17: and here comes the next one
       }
     }
 
@@ -1637,7 +1677,11 @@
     }
 
     on(window, 'pointermove', function (e) {
-      if (capShown) return;                 // V2.12: the playfield is shielded
+      if (capShown) {                       // V2.12: the playfield is shielded
+        // physics-only: remembered so the resume is not blind (V2.16)
+        if (e.isTrusted) { shieldX = e.clientX; shieldY = e.clientY; shieldSeen = true; }
+        return;
+      }
       var t = NOW();
       setPointer(e.clientX, e.clientY, t);
       // V2.7 layer B: only a trusted move is evidence that a pointer is really
@@ -1650,7 +1694,10 @@
     }, { passive: true });
 
     on(window, 'pointerdown', function (e) {
-      if (capShown) return;                 // V2.12: the playfield is shielded
+      if (capShown) {                       // V2.12: the playfield is shielded
+        if (e.isTrusted) { shieldX = e.clientX; shieldY = e.clientY; shieldSeen = true; }
+        return;
+      }
       setPointer(e.clientX, e.clientY, NOW());
       if (!e.isTrusted) return;
       // which device is behind the click that is about to be judged (V2.7 item 1)
@@ -1962,6 +2009,13 @@
       heading += turn * 1.5 * dt;
 
       var ax = 0, ay = 0;
+
+      // V2.16 wake-up: a brief unconditional shove away from the cursor after a
+      // shielded interlude, so the card is never handed over becalmed.
+      if (hasPointer && now < wakeUntil) {
+        ax += awx * WAKE_ACCEL;
+        ay += awy * WAKE_ACCEL;
+      }
 
       if (hasPointer && prox > 0) {
         ax += awx * FLEE_ACCEL * p2;
@@ -2283,7 +2337,7 @@
       // Layer D samples between sub-step batches: the transform on screen is the
       // one this frame just drew, so it can be compared against the position the
       // engine integrated to.
-      if (CAPTCHA_ON && !capFired && started && t >= capAt) showCaptcha('timer');
+      if (CAPTCHA_ON && !capBroken && !capShown && started && t >= capAt) showCaptcha('timer');
       capTick(t);
 
       if (geomDirty) { geomDirty = false; checkStructure(); attest(); }
