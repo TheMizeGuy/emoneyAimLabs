@@ -64,8 +64,19 @@ function createApp(deps) {
     res.type('text/plain').status(200).send('ok');
   });
 
-  // Before CORS, cookies and the wall: the cheapest possible place to shed a
-  // flood. Mounted after /healthz so Railway's healthcheck is never throttled.
+  // CORS goes first so that every response the limiter produces still carries
+  // Access-Control-Allow-Origin. A bare 429 is unreadable to the browser: fetch
+  // rejects it as an opaque network error, and js/net.js cannot tell that apart
+  // from an unreachable host, so it marks the backend dead and tells the player
+  // the leaderboard is offline while it is up and merely asking them to slow
+  // down. Ordering costs nothing: this layer only sets headers, so a flood still
+  // reaches the limiter without parsing a cookie, verifying a session or
+  // touching the database, and a preflight it answers early is cheaper than the
+  // 429 it replaces.
+  app.use(corsFor(config.gameOrigin));
+
+  // The cheapest place left to shed a flood: in front of cookies and the wall,
+  // and after /healthz so Railway's healthcheck is never throttled.
   app.use(rateLimit(
     deps.limiter,
     (req) => `ip:${clientAddress(req)}`,
@@ -74,7 +85,6 @@ function createApp(deps) {
     recorder.note,
   ));
 
-  app.use(corsFor(config.gameOrigin));
   // Loaded before the CSRF wall so a rejected request can still be attributed
   // to whoever's cookie it carried.
   app.use(sessionLoaderFor(config, deps.now));

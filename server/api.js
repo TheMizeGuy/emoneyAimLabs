@@ -42,6 +42,17 @@ const FEED_RATE_LIMIT = 10;
 const RUN_LIMIT = 20;
 const SWEEP_INTERVAL_MS = MINUTE_MS;
 
+// How far a claim has to fall short of the server-timed chase before the server
+// will say out loud that it was forged. This is not a validation threshold -
+// LIMITS.EARLY_CLAIM_TOLERANCE_MS still refuses the score at 1.5 s and nothing
+// below relaxes it. It exists because the claim is structurally smaller than the
+// server's window by one or two round trips (the client deducts the challenge
+// across a full request, and the score POST waits on a beat that is already in
+// flight), so at 1.5 s a slow mobile link earned a public "server clock
+// manipulation" line in the feed and a clock-forgery ban. A forger claims a
+// wildly short time and is still branded; a bad connection is only refused.
+const CLOCK_FORGERY_MARGIN_MS = 8000;
+
 const STATUS_BY_CODE = Object.freeze({
   invalid_body: 400,
   invalid_run_id: 400,
@@ -361,7 +372,14 @@ function createApiRouter(deps) {
     // boundary on the server clock, once and only once.
     const chaseStarted = chase ? await store.stampChaseStart(run.id, nowDate) : false;
 
-    const gapMs = run.lastBeatAtMs === null ? -1 : nowDate.getTime() - run.lastBeatAtMs;
+    // Bounded before it reaches the telemetry columns. The run-age check above
+    // already refuses a run older than this, so an honest gap can never exceed
+    // the bound anyway; the clamp is here because this value gets squared in
+    // SQL, and an unbounded number that only feeds observation-only telemetry
+    // must never be able to abort the UPDATE that keeps the run alive.
+    const gapMs = run.lastBeatAtMs === null
+      ? -1
+      : Math.min(nowDate.getTime() - run.lastBeatAtMs, LIMITS.MAX_RUN_AGE_MS);
     const result = await store.countBeat(run.id, nowDate, {
       minSpacingMs: LIMITS.MIN_BEAT_SPACING_MS,
       maxAgeMs: LIMITS.MAX_RUN_AGE_MS,
@@ -427,7 +445,14 @@ function createApiRouter(deps) {
       floors: config.floors,
     });
     if (!verdict.ok) {
-      if (verdict.code === 'time_below_elapsed' && run && run.userId === req.session.sub) {
+      // Refusing is cheap and reversible; naming someone a cheat in a public
+      // feed is neither, so it waits for a shortfall no round trip can explain.
+      const shortfallMs = verdict.detail && Number.isFinite(verdict.detail.scoredChasePhaseMs)
+        ? verdict.detail.scoredChasePhaseMs - claim.timeMs
+        : 0;
+      if (verdict.code === 'time_below_elapsed'
+        && run && run.userId === req.session.sub
+        && shortfallMs > CLOCK_FORGERY_MARGIN_MS) {
         await streamCheat(run.userId, 'server clock manipulation');
         const failure = await store.applyBan(run.userId, run.id, 'clock-forgery');
         if (failure) await streamFailures([failure]);

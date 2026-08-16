@@ -88,7 +88,7 @@ consumes the run and records the score exactly once.
 | AC-14 | High | Reproduced path fixed; broader automation remains | Native CDP input is browser-trusted. A live locator loop read the moving Close rect and won Practice in 3.638 s against the old gate. A winning press now requires a current 96+ ms, four-frame middle-band approach. That blocks the reproduced teleport path, not a bot deliberately generating the same multi-frame journey. |
 | AC-01 | High | Fixed and deployed | Simulation validation counted Flappy heartbeats as Chase liveness. `chase_start_beats` now snapshots the credited count at the phase boundary, and validation independently checks both phases. An end-to-end exploit regression fails closed. |
 | RC-01 | High | Fixed and deployed | All address-based limits used Express `req.ip` with hop-count proxy trust. Railway documents `X-Real-IP`, while a regression proved rotating caller-controlled `X-Forwarded-For` minted new buckets. One validated `X-Real-IP` helper now drives the global, auth, public-read, SSE, and audit identities; XFF is ignored. |
-| AC-15 | High | Fixed and deployed | Score timing was one-sided: a modified client could wait out a long live run, then claim the configured floor. Validation now pins claims to both sides of the server-observed scored window, excluding only the server-timestamped Practice challenge. A backwards claim closes the run and publishes `cheat_detected`, so it cannot be retried with a corrected number. |
+| AC-15 | High | Fixed and deployed | Score timing was one-sided: a modified client could wait out a long live run, then claim the configured floor. Validation now pins claims to both sides of the server-observed scored window, excluding only the server-timestamped Practice challenge. A claim that falls far enough short of the observed window closes the run and publishes `cheat_detected`, so it cannot be retried with a corrected number. |
 | AC-02 | Medium | Fixed and deployed | Closing an old run and opening its successor were separate operations. Replacement now locks the stable user row and closes, counts, inserts, and prunes in one transaction. A unique expression index independently permits at most one open run per user. |
 | AC-03 | Medium | Fixed | Late run-open replies and overlapping heartbeats could revive a replaced attempt or reuse one chain token. Opens are ordered and generation-guarded; beats are serialized; phase transitions queue; teardown invalidates late completions. |
 | AC-04 | Medium | Fixed | Score submission could overtake the final heartbeat/phase stamp. A win now waits for the owning heartbeat chain and rechecks run generation before submitting. |
@@ -133,7 +133,10 @@ consumes the run and records the score exactly once.
 - A claim may exceed the server-observed scored Chase duration by at most three seconds and may be
   shorter by at most 1.5 seconds for request timing. Practice subtracts only its server-timestamped
   puzzle interval. Required heartbeats cover that scored window, and the latest credited beat must
-  be fresh. A materially backwards claim is terminal and public.
+  be fresh. Refusal and accusation are deliberately not the same threshold: the claim is
+  structurally smaller than the server's window by one or two round trips, so a shortfall past 1.5
+  seconds is refused, while only a shortfall past eight seconds closes the run and names the player
+  publicly. A slow connection loses the score; a forged clock loses the run.
 - The visual challenge is freshly CSPRNG-seeded on the server, four rounds, one-attempt, and placed
   after Flappy/before Chase in Simulation or 0.5-1.8 seconds into Practice. Simulation samples a new
   independent x/y popup spawn after it closes. The browser receives only rasters and public candidate

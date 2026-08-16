@@ -358,6 +358,41 @@ test('beat telemetry records intervals and is never consulted by validation', as
   await pool.end();
 });
 
+// A backgrounded tab has its timers throttled to roughly one tick a minute, so
+// an honest player who switches away sends a gap far past 46341 ms - the point
+// where an integer-typed gap squared no longer fits int4. That aborted the whole
+// UPDATE, last_beat_at never advanced, and every later beat failed the same way
+// until the run was swept. pg-mem does JavaScript arithmetic and has no int4
+// range, so it cannot reproduce the overflow: this holds the code path, and the
+// double precision casts in the SQL are the fix.
+test('a beat from a throttled background tab credits and leaves the run beatable', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+  const runId = await liveRun(store, clock, '1');
+
+  const first = await store.countBeat(runId, clock.advance(5000), { ...BEAT_OPTS, expectedCounter: 0 });
+  assert.equal(first.counted, true);
+
+  const throttled = await store.countBeat(runId, clock.advance(90000), {
+    ...BEAT_OPTS, expectedCounter: 1, gapMs: 90000,
+  });
+  assert.equal(throttled.counted, true);
+  assert.equal(throttled.counter, 2);
+
+  // The point of the regression: the next beat still credits, which it cannot
+  // do unless last_beat_at moved with the one before it.
+  const resumed = await store.countBeat(runId, clock.advance(5000), {
+    ...BEAT_OPTS, expectedCounter: 2, gapMs: 5000,
+  });
+  assert.equal(resumed.counted, true);
+  assert.equal(resumed.counter, 3);
+
+  const telemetry = await store.beatTelemetry(runId);
+  assert.equal(telemetry.count, 2);
+  assert.equal(telemetry.meanMs, 47500);
+  await pool.end();
+});
+
 test('opening a new run closes the previous one and moves both fail counters', async () => {
   const { pool, store, clock } = await fixture();
   await seed(store, clock, '1');
@@ -770,10 +805,34 @@ test('a ban closes the open run, colours it and counts once', async () => {
   assert.equal(history.outcome, 'failed');
   assert.equal(history.failReason, 'captcha-fail');
 
-  // A second ban only recolours the already closed run.
+  // A second ban is inert: it neither counts again nor renames the verdict the
+  // first one recorded.
   assert.equal(await store.applyBan('1', runId, 'timeout'), null);
   assert.equal((await store.getUser('1')).totalFails, 1, 'no double counting');
+  assert.equal((await store.listRuns('1'))[0].failReason, 'captcha-fail');
+  await pool.end();
+});
+
+// The client reports its own ban reason, so relabelling has to be limited to
+// runs nothing has judged yet. Otherwise a player closed as a clock forger can
+// POST a 'timeout' ban for that run id and rewrite their public history.
+test('a client ban names a silently closed run but never overwrites a server verdict', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+
+  const swept = await liveRun(store, clock, '1');
+  clock.advance(120000);
+  assert.equal((await store.failStaleRuns(clock.now())).length, 1);
+  assert.equal((await store.listRuns('1'))[0].failReason, null, 'the sweep names no reason');
+
+  assert.equal(await store.applyBan('1', swept, 'timeout'), null, 'already closed, not re-counted');
   assert.equal((await store.listRuns('1'))[0].failReason, 'timeout');
+  assert.equal((await store.getUser('1')).totalFails, 1, 'labelling never adds a failure');
+
+  const judged = await liveRun(store, clock, '1');
+  assert.ok(await store.applyBan('1', judged, 'clock-forgery'));
+  assert.equal(await store.applyBan('1', judged, 'timeout'), null);
+  assert.equal((await store.listRuns('1'))[0].failReason, 'clock-forgery');
   await pool.end();
 });
 
@@ -946,6 +1005,31 @@ test('rejections are recorded and never surface anywhere else', async () => {
   assert.equal(rows[0].reason, 'below_floor');
   assert.deepEqual(rows[0].payload, { timeMs: 12 });
   assert.equal(rows[1].user_id, null);
+  await pool.end();
+});
+
+// Endpoint and reason have always been clamped; payload was the one field with
+// no ceiling, and it is the only one the caller writes directly - several fail()
+// sites echo the request body straight into it. At a 4 KB body and 30 events a
+// minute one account could bury the audit trail in its own noise.
+test('an oversize rejection payload is stored bounded and marked', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+
+  await store.recordRejection({
+    userId: '1',
+    ipHash: 'abc123',
+    endpoint: 'POST /api/event',
+    reason: 'invalid_body',
+    payload: { blob: 'x'.repeat(4000) },
+  }, clock.now());
+
+  const { rows } = await pool.query('SELECT payload FROM rejections');
+  const stored = rows[0].payload;
+  assert.equal(stored.truncated, true);
+  assert.ok(stored.length > 4000, 'the real size is kept even though the text is not');
+  assert.ok(stored.head.length <= 1000, `head was ${stored.head.length} characters`);
+  assert.ok(JSON.stringify(stored).length < 1200, 'the whole row stays small');
   await pool.end();
 });
 

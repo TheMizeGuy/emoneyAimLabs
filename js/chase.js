@@ -450,6 +450,12 @@
     var LOOP_DEAD_MS  = 1000;  // main loop silent this long, while visible, = restart it
     var LOOP_STALL_GRACE = 2;  // F10: a browser that hiccups once is not an attacker
     var LOOP_STALL_MAX   = 3;  // F10: and it can never be more than this per run
+    /* How many frames of a whole run may claim document.hidden before the flag
+       is treated as a lie. A hidden tab is a PAUSED one here, so the only honest
+       source is the frame that races a visibility change -- one per tab switch.
+       A spoof has to claim most frames to be worth anything, so it spends this
+       inside two seconds at 60 fps while a player never gets close. */
+    var HIDDEN_LIE_FRAMES = 60;
 
     /* V2.7 layer B -- cursor presence gate on the winning press. */
     var PRESENCE_MS   = 350;   // a trusted move must be this recent...
@@ -537,6 +543,7 @@
       'presence':           'SUS: click with no pointer behind it',
       'teleport':           'SUS: pointer teleport detected',
       'stall':              'SUS: engine stall detected',
+      'hidden-lie':         'SUS: page visibility flag spoofed',
       'lag-debt':           'SUS: frame lag debt exceeded',
       'loop-stall':         'SUS: render loop stalled'
     };
@@ -785,7 +792,7 @@
     var HAS_POINTER_EVENTS = !!W.PointerEvent;
 
     // F3/F4 physics: a spoofed document.hidden, and stall-loop counting
-    var hiddenFrames = 0, pauseFrames = 0, stallFlagged = false;
+    var hiddenFrames = 0, hiddenLies = false, pauseFrames = 0, stallFlagged = false;
 
     // F5 quality: timers that must not outlive stop()
     var storeTimer = 0, voiceTimers = [];
@@ -798,7 +805,7 @@
 
     // V2.7 layer B: the last trusted mouse position, and the press that failed the gate
     var moveT = -1e9, moveX = 0, moveY = 0, presenceBlockAt = -1e9;
-    var aimAt = -1e9, aimFrame = -1e9;
+    var aimAt = -1e9, aimFrame = -1e9, aimLastAt = -1e9;
     var presenceSus = 0;
 
     // V2.7 layer D: how many frames until the next attestation
@@ -1300,7 +1307,7 @@
     }
 
     function attest() {
-      if (won || stopped || !calibrated || paused) return;
+      if (won || banned || stopped || !calibrated || paused) return;
       // our own restoreChrome() writes are observed by mo2; do not re-judge them
       if (NOW() < restoreQuietUntil) return;
       var br = boxOf(btn);
@@ -1407,7 +1414,7 @@
     // comes back with its listeners intact, because the engine never let go of
     // the node -- only the document did.
     function checkStructure() {
-      if (won || stopped) return;
+      if (won || banned || stopped) return;
       var n = 0;
       n += ensure(root, wrap, null);
       n += ensure(wrap, card, taunt);
@@ -1566,8 +1573,22 @@
           acceptChallenge(true);
           return;
         }
-        if (payload && payload.refused && payload.error === 'challenge_retry_later') {
-          banPlayer('challenge-retry', payload.retryAfterSeconds);
+        if (payload && payload.refused) {
+          if (payload.error === 'challenge_retry_later') {
+            banPlayer('challenge-retry', payload.retryAfterSeconds);
+            return;
+          }
+          /* Every other refusal used to fall through to captcha-fail, which
+             tells the player "That is not where the piece goes." about a puzzle
+             that never rendered and posts a public ban line under their name.
+             It is reachable honestly: a Practice run paused past the server's
+             challenge-offset window comes back with challenge_wrong_phase, which
+             is a player losing a race rather than answering wrongly. Carry on
+             unranked instead. The server still requires a completed challenge,
+             so the score is refused with challenge_required rather than
+             credited -- nothing rankable is gained by never seeing the puzzle. */
+          setText(capText, 'Verification unavailable. Continuing as an unranked run.');
+          acceptChallenge(true);
           return;
         }
         if (!validChallenge(payload)) { banPlayer('captcha-fail'); return; }
@@ -1609,9 +1630,21 @@
         answers: capAnswers.slice()
       })).then(function (result) {
         if (!capShown || stopped || banned) return;
-        if (result && result.solved === true) acceptChallenge(false);
-        else banPlayer(result && result.error === 'challenge_expired'
-          ? 'captcha-timeout' : 'captcha-fail');
+        if (result && result.solved === true) { acceptChallenge(false); return; }
+        /* Only the server's own verdict may fail a player here. net.js collapses
+           a timeout, a 5xx, an expired session and the dead-backend cooldown
+           into the same empty answer, which is indistinguishable from a wrong
+           drop -- so a network blip used to ban somebody who had just solved all
+           four rounds, and say so on the public feed. A refusal is a verdict; no
+           answer at all is not, and it continues unranked. The server never saw
+           a completed challenge either way, so it holds the score to
+           challenge_required. */
+        if (result && result.refused === true) {
+          banPlayer(result.error === 'challenge_expired' ? 'captcha-timeout' : 'captcha-fail');
+          return;
+        }
+        setText(capText, 'Verification unavailable. Continuing as an unranked run.');
+        acceptChallenge(true);
       }, function () { banPlayer('captcha-fail'); });
     }
 
@@ -1645,6 +1678,11 @@
     function banPlayer(reason, retryAfterSeconds) {
       if (banned || won || stopped) return;
       banned = true;
+      /* The run is over, so the loop that defends it stops with it -- win() has
+         always ended the same way. Left running, it kept attesting geometry and
+         charging sus points against a finished run, and kept integrating a card
+         nobody can see behind an opaque failure screen. */
+      CAF(rafId);
       capLoadGen++;
       capShown = false;
       capArmed = false;
@@ -2108,6 +2146,7 @@
     function resetAimTrail() {
       aimAt = -1e9;
       aimFrame = -1e9;
+      aimLastAt = -1e9;
     }
 
     function recordAimMove(cx, cy, t) {
@@ -2115,19 +2154,32 @@
       var dx = cx - (x + btnOffX), dy = cy - (y + btnOffY);
       var d = Math.sqrt(dx * dx + dy * dy);
       if (d > AIM_RADIUS) { resetAimTrail(); return; }
-      // Keep the first observed middle-band point. Direct automation that reads
-      // the current rect and jumps straight to its centre reports d ~= 0 only.
-      if (d > AIM_CLOSE_PX && aimAt <= -1e8) {
-        aimAt = t;
-        aimFrame = framesRun;
+      // Direct automation that reads the current rect and jumps straight to its
+      // centre reports d ~= 0 only, so a middle-band point is the whole test.
+      // Two of them are kept: the FIRST is the evidence that crossing the band
+      // took real time and real frames, the LATEST is the evidence that this is
+      // the approach being judged rather than one from a minute ago.
+      if (d > AIM_CLOSE_PX) {
+        aimLastAt = t;
+        if (aimAt <= -1e8) {
+          aimAt = t;
+          aimFrame = framesRun;
+        }
       }
     }
 
+    /* One timestamp had to clear the minimum age AND the maximum age at once,
+       and the pointer is only ever pulled out past AIM_RADIUS by a player who
+       gives up on the window. So any endgame that stayed inside 260 px for more
+       than AIM_MAX_MS refused EVERY winning click as a teleport, for as long as
+       it lasted -- the commonest way to finish this game. The maximum now reads
+       the newest observation and the minimum still reads the oldest, which is
+       what each of them was always asking about. */
     function aimJourneyOK() {
-      var age = NOW() - aimAt;
+      var now = NOW();
       return aimAt > -1e8
-          && age >= AIM_MIN_MS
-          && age <= AIM_MAX_MS
+          && (now - aimAt) >= AIM_MIN_MS
+          && (now - aimLastAt) <= AIM_MAX_MS
           && (framesRun - aimFrame) >= AIM_MIN_FRAMES;
     }
 
@@ -2362,13 +2414,18 @@
     });
 
     on(window, 'click', function (e) {
-      if (won || paused || capShown) return;
+      /* `banned` belongs on this line as much as `won` does. The failure screen
+         covers the page and carries two buttons, and every press of one used to
+         run the playfield handler below: an [AIMLAB] MISS line after
+         [AIMLAB] RUN FAILED, an error chord and a shockwave, all against a run
+         that had already ended. */
+      if (won || banned || paused || capShown) return;
 
       // The engine's own dialogs are not the playfield. Dismissing the shame box
       // used to cost the player a miss and an error chord for a dialog the game
       // put in front of them.
       if (shameBox.contains(e.target) || overlay.contains(e.target) ||
-          pauseBox.contains(e.target)) return;
+          pauseBox.contains(e.target) || banBox.contains(e.target)) return;
 
       // A press that failed the presence gate already counted as a miss. Whatever
       // click it produces, and wherever that click retargets to, must not count
@@ -2450,7 +2507,7 @@
        time and it makes the card faster, which makes it harder to catch, so
        using it as steering is paying to make your own job worse. */
     function shockwave(cx, cy) {
-      if (won || paused || stopped) return;
+      if (won || banned || paused || stopped) return;
       var hw = cardW / 2, hh = cardH / 2;
       var gx = (cx < x - hw) ? (x - hw - cx) : ((cx > x + hw) ? (cx - x - hw) : 0);
       var gy = (cy < y - hh) ? (y - hh - cy) : ((cy > y + hh) ? (cy - y - hh) : 0);
@@ -2815,13 +2872,22 @@
       /* A hidden tab receives no rAF callbacks in any shipping browser, so
          "hidden while animating" is a contradiction and the flag is a lie. It
          used to be cached from an unauthenticated visibilitychange, which made
-         two console lines enough to freeze the physics for free. Believe it for
-         a handful of frames, then stop. */
-      var hidden = !!document.hidden;
-      if (hidden) {
-        if (++hiddenFrames > 10) hidden = false;
-      } else {
-        hiddenFrames = 0;
+         two console lines enough to freeze the physics for free.
+
+         The grace used to be CONSECUTIVE, and any frame that read false reset
+         it, so a getter answering true on ten frames out of every eleven never
+         reached the limit: integrate() returned 0 on nine tenths of the frames,
+         the card crawled at a ninth of its speed and the reported time kept full
+         pace. Nothing else caught it either -- the stall path is skipped while
+         hidden, the dropped simulation goes out with the accumulator, and the
+         heartbeat stands down on the same flag. The budget is spent over the
+         whole run now and the verdict sticks for the rest of it. */
+      var hidden = !hiddenLies && !!document.hidden;
+      if (hidden && ++hiddenFrames > HIDDEN_LIE_FRAMES) {
+        hiddenLies = true;
+        hidden = false;
+        sus('hidden-lie');
+        showTaunt(TAUNT_LAG);
       }
 
       if (dtMs > PAUSE_MS || hidden) {
@@ -2937,8 +3003,15 @@
        heartbeat notices its own main loop has died and restarts it, which makes
        the sweep pointless rather than merely detectable. */
     function heartbeat() {
-      if (stopped || won || paused || !started) return;
-      if (document.hidden) return;              // no rAF is expected while hidden
+      // banned belongs here with won: banPlayer() cancels the loop, and without
+      // this the watchdog would restart it a second later and charge a
+      // loop-stall sus point against a run that has already ended.
+      if (stopped || won || banned || paused || !started) return;
+      /* No rAF is expected while hidden, and a genuinely hidden tab is a paused
+         one, which the line above already covers. Once integrate() has caught
+         the flag lying, though, standing down here is precisely what the spoof
+         wants: the loop stays dead and the watchdog agrees to leave it dead. */
+      if (!hiddenLies && document.hidden) return;
       var gap = NOW() - lastT;
       if (gap < LOOP_DEAD_MS) return;
       lastT = NOW();

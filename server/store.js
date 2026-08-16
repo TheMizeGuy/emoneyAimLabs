@@ -8,6 +8,11 @@ const { newRunToken } = require('./validation');
 
 const MAX_TEXT = 200;
 const MAX_URL = 512;
+// Serialized size ceiling for one audit row's payload. Several fail() sites
+// echo the caller's own request body back into the note, and the body limit is
+// 4 KB, so an authenticated account could otherwise write 120 KB a minute into
+// the one table whose whole purpose is being readable.
+const MAX_PAYLOAD = 1000;
 const LEADERBOARD_LIMIT = 50;
 // Run history kept per player, oldest pruned on insert.
 const RUN_HISTORY_LIMIT = 100;
@@ -451,6 +456,15 @@ function createStore(pool) {
   // last_beat_at is assigned LAST: several expressions above read its previous
   // value, and not every Postgres-compatible engine evaluates a SET list
   // simultaneously.
+  //
+  // The gap parameter is cast to double precision at every use. Uncast, `$5 < 0`
+  // let Postgres infer integer, so `$5 * $5` overflowed int4 at a gap of 46341 ms
+  // and aborted the whole UPDATE - last_beat_at included. Browsers throttle a
+  // background tab's timers to roughly one tick a minute, so an honest player who
+  // switched tabs sent a 60000 ms gap, got a 500, and then failed every later beat
+  // identically because last_beat_at never advanced: the run died. Telemetry that
+  // is never read back by any validation path must never be able to break the
+  // liveness write it rides along with.
   async function countBeat(runId, now, options) {
     const {
       minSpacingMs, maxAgeMs, expectedCounter, gapMs, allowUnspaced = false,
@@ -461,9 +475,11 @@ function createStore(pool) {
       `UPDATE runs
        SET beats = beats + 1,
            beat_counter = beat_counter + 1,
-           beat_gap_n = CASE WHEN $5 < 0 THEN beat_gap_n ELSE beat_gap_n + 1 END,
-           beat_gap_sum = CASE WHEN $5 < 0 THEN beat_gap_sum ELSE beat_gap_sum + $5 END,
-           beat_gap_sq = CASE WHEN $5 < 0 THEN beat_gap_sq ELSE beat_gap_sq + ($5 * $5) END,
+           beat_gap_n = CASE WHEN $5::double precision < 0 THEN beat_gap_n ELSE beat_gap_n + 1 END,
+           beat_gap_sum = CASE WHEN $5::double precision < 0
+             THEN beat_gap_sum ELSE beat_gap_sum + $5::double precision END,
+           beat_gap_sq = CASE WHEN $5::double precision < 0
+             THEN beat_gap_sq ELSE beat_gap_sq + ($5::double precision * $5::double precision) END,
            last_beat_at = $2
        WHERE id = $1
          AND consumed = false
@@ -502,6 +518,24 @@ function createStore(pool) {
 
   // One row per rejected request. Writing it must never break the response, so
   // every caller treats a failure here as nothing worse than a missing note.
+  //
+  // The payload was the one field with no ceiling, and it is the only one an
+  // attacker writes directly: it is the claimed game numbers, but several fail()
+  // sites hand it the raw request body. Oversize notes are replaced rather than
+  // sliced, because the column is jsonb and half a serialized object is not
+  // valid JSON - the head is kept as a string so the trail still shows what was
+  // sent.
+  function boundedPayload(value) {
+    const serialized = JSON.stringify(value === undefined ? {} : value);
+    if (typeof serialized !== 'string') return JSON.stringify({});
+    if (serialized.length <= MAX_PAYLOAD) return serialized;
+    return JSON.stringify({
+      truncated: true,
+      length: serialized.length,
+      head: clamp(serialized, MAX_PAYLOAD),
+    });
+  }
+
   async function recordRejection(entry, now) {
     await pool.query(
       `INSERT INTO rejections (user_id, ip_hash, endpoint, reason, payload, at)
@@ -511,7 +545,7 @@ function createStore(pool) {
         entry.ipHash || null,
         clamp(entry.endpoint, MAX_TEXT),
         clamp(entry.reason, MAX_TEXT),
-        JSON.stringify(entry.payload === undefined ? {} : entry.payload),
+        boundedPayload(entry.payload),
         now,
       ],
     );
@@ -685,9 +719,18 @@ function createStore(pool) {
       // The named run was already closed by the sweep or by a replacement;
       // only its reason is new. Binding this update to the run id is critical:
       // a late event from an old attempt must never select the newer open run.
+      //
+      // fail_reason IS NULL is what keeps this a labelling step rather than an
+      // overwrite. The sweep and failOpenRunsForUser close a run without naming
+      // a reason, which is the only case that wants a name later. A run the
+      // server itself closed already carries the server's verdict, and without
+      // this guard a player closed with 'clock-forgery' or 'captcha-fail' could
+      // POST /api/event {type:'ban',reason:'timeout'} for that run id and
+      // relabel the public record of their own cheating.
       await client.query(
         `UPDATE runs SET fail_reason = $2
-         WHERE id = $1 AND user_id = $3 AND consumed = false AND failed = true`,
+         WHERE id = $1 AND user_id = $3 AND consumed = false AND failed = true
+           AND fail_reason IS NULL`,
         [runId, reason, userId],
       );
       await client.query('COMMIT');

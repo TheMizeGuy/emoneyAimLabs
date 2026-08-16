@@ -248,6 +248,11 @@
   // Resolves to {bestMs, rank}, or null if the server refused or is unreachable.
   // V3.3: the engine's sus counter and signed WIN line ride along as the
   // client-attestation layer. Friction on top of the server's own witness.
+  /* Bypasses the outage cooldown, for the same reason logout does. This is the
+     one irreversible call in the file: the run is over, the score exists once,
+     and a single stalled heartbeat mid-run puts the whole client to sleep for
+     thirty seconds. That cost the player the win outright -- never POSTed, and
+     told the leaderboard was offline while it was up and answering. */
   function submitScore(runId, timeMs, misses, nearMisses, sus, sig) {
     if (!runId) return Promise.resolve(null);
     return call('POST', '/api/score', {
@@ -257,7 +262,7 @@
       nearMisses: nearMisses,
       sus: sus,
       sig: sig
-    }, true).then(function (r) {
+    }, true, true).then(function (r) {
       if (!r) return null;                       // unreachable
       if (r.refused) return r;                   // refused, with the server's own words
       return (typeof r.rank !== 'undefined') ? r : null;

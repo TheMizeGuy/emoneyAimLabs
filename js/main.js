@@ -181,7 +181,14 @@
   function paintAccount() {
     if (!acctLogin) return;
     if (!apiUp) {
-      acctLogin.classList.add('hide');
+      /* The OFFLINE note used to take the sign-in button down with it, and
+         nothing ever re-probed, so one slow boot me() against a cold container
+         left a visitor with no way to sign in for the rest of the page's life.
+         Signing in is a top-level navigation, not a fetch: it works whatever
+         the API is doing, so a signed-out visitor keeps the button beside the
+         note. Someone already signed in has nothing to do here, so their row
+         still steps aside for it. */
+      acctLogin.classList.toggle('hide', !!user);
       acctIn.classList.add('hide');
       acctNote.classList.remove('hide');
       return;
@@ -201,8 +208,18 @@
   /* One renderer, two mounts: the start-screen panel and the win-dialog modal.
      Builds rows with DOM calls rather than innerHTML, so a display name out of
      Twitch is text and never markup. */
-  function renderBoard(listEl, mode, statusEl) {
+  /* Each mount carries its own request counter, the way the Properties sheet
+     carries propToken. Without one, a first read that timed out at six seconds
+     landed after a later successful one, wiped the good board and latched
+     apiUp=false for the rest of the page. A single shared counter would not do:
+     these are two separate boards, and a reply for one must not be thrown away
+     because the other was opened while it was in flight. */
+  var boardReq = { seq: 0 };
+  var modalReq = { seq: 0 };
+
+  function renderBoard(listEl, mode, statusEl, req) {
     if (!listEl) return;
+    var seq = ++req.seq;
     clear(listEl);
 
     // the era's idea of "working on it"
@@ -220,6 +237,7 @@
     if (!NET) { clear(listEl); offlineInto(listEl, statusEl); return; }
 
     NET.leaderboard(mode).then(function (data) {
+      if (seq !== req.seq) return;                 // a newer read already owns this mount
       clear(listEl);
       /* The server's payload is {mode, entries, you}. Reading `rows` here made
          every board permanently empty AND latched apiUp=false at boot, which
@@ -450,9 +468,33 @@
        under way by then, which startRun's own inChase handling covers. */
     var gen = ++runGen;
     if (user) { openRun(mode, gen); return; }
-    if (bootMe) bootMe.then(function () { openRun(mode, gen); });
+    if (!bootMe) return;
+    /* The wait itself has to be publishable, not just the POST that follows it.
+       While the boot me() was still in flight nothing had set
+       activeRunOpenPromise, so reportChallenge's `opening` guard found nothing
+       to wait behind, saw a null user and declared the challenge unranked --
+       and acceptChallenge(true) then skipped the puzzle entirely. The identity
+       landed a moment later, a real run opened, the player won it, and the
+       server refused the score with challenge_required. */
+    var pending = bootMe.then(
+      function () { return openRun(mode, gen); },
+      // net.js never rejects, but a replacement client must not leave anything
+      // waiting on this promise stranded behind an unhandled rejection.
+      function () { return null; });
+    activeRunOpenGen = gen;
+    activeRunOpenPromise = pending;
+    pending.then(function () {
+      // openRun republishes with its own handled promise and clears that one;
+      // this only has to release the boot wait when there was no POST at all.
+      if (activeRunOpenGen === gen && activeRunOpenPromise === pending) {
+        activeRunOpenGen = 0;
+        activeRunOpenPromise = null;
+      }
+    });
   }
 
+  // Returns the promise that settles once the run is open (or once the attempt
+  // has been abandoned), so the deferred boot path above can publish the wait.
   function openRun(mode, gen) {
     if (!NET || isSeam || !user) return;      // genuinely signed out: nothing to open
     if (gen !== runGen) return;               // that run was abandoned while we waited
@@ -486,6 +528,7 @@
     // Keep the queue usable even if a replacement network client rejects in
     // violation of net.js's always-resolve contract.
     runOpenTail = handled.then(function () { return null; }, function () { return null; });
+    return handled;
   }
 
   /* The chase segment has begun: the server stamps the phase transition off the
@@ -747,7 +790,17 @@
       return;
     }
 
-    if (!skipFlappy) ERR('[AIMLAB] flappy unavailable, starting the chase directly');
+    /* Starting the chase anyway was a doomed run: beginRun has already opened a
+       server-witnessed one, and a Simulation win with no gauntlet behind it is
+       refused with flappy_phase_too_short -- so an honest player got a fail row
+       on their record for a script that failed to load. startChase's own
+       equivalent failure puts the menu back; so does this one. ?skipflappy=1 is
+       the QA seam and means it on purpose. */
+    if (!skipFlappy) {
+      ERR('[AIMLAB] flappy unavailable');
+      failToMenu();
+      return;
+    }
     startSimChase(null);
   }
 
@@ -1168,7 +1221,7 @@
     panelGame.classList.toggle('hide', board || stats);
     panelBoard.classList.toggle('hide', !board);
     panelStats.classList.toggle('hide', !stats);
-    if (board) renderBoard(boardList, 'simulation', boardStatus);
+    if (board) renderBoard(boardList, 'simulation', boardStatus, boardReq);
     if (stats) loadStats();
   }
 
@@ -1283,7 +1336,7 @@
   // the modal, used by the win dialog's View leaderboard button
   function openModal() {
     lbBox.classList.remove('hide');
-    renderBoard(lbList, 'simulation', lbStatus);
+    renderBoard(lbList, 'simulation', lbStatus, modalReq);
   }
 
   if (tabGame) {
@@ -1320,6 +1373,30 @@
     });
   }
 
+  /* net.js sleeps for thirty seconds after the first outright failure, and the
+     boot pair below is serialised, so a cold container that loses the identity
+     call also loses the leaderboard call queued behind it -- apiUp latches false
+     with nothing in the page left to clear it. One retry after that cooldown has
+     expired costs a single request and gives a container that has since woken up
+     its account panel back. Once per page: a backend that is genuinely gone is
+     not worth a second one. */
+  var REPROBE_MS = 31000;
+  var reprobed = false;
+
+  function reprobeApi() {
+    if (reprobed || !NET) return;
+    reprobed = true;
+    window.setTimeout(function () {
+      NET.me().then(function (u) {
+        if (u && !user) user = u;
+        return NET.leaderboard('simulation');
+      }).then(function (d) {
+        apiUp = !!(d && (d.entries || d.rows));
+        paintAccount();
+      });
+    }, REPROBE_MS);
+  }
+
   /* Ask who we are once at boot. Any failure just leaves the panel in its
      signed-out state, or OFFLINE if the API never answered. */
   if (NET) {
@@ -1337,6 +1414,7 @@
     }).then(function (d) {
       apiUp = !!(d && (d.entries || d.rows));
       paintAccount();
+      if (!apiUp) reprobeApi();
     });
   } else {
     apiUp = false;

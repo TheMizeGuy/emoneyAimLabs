@@ -39,6 +39,12 @@ const AGGREGATE_FLUSH_MS = 60000;
 // verdicts - 98.2% noise in the one table whose entire purpose is letting the
 // owner see cheating attempts. An audit trail nobody can read is not an audit
 // trail. The verdicts below are what actually belongs in it.
+//
+// The last three are the public read surface: GET /api/leaderboard refuses an
+// unknown ?mode, and GET /api/player/:twitchId refuses a malformed or unknown
+// id. Neither route requires a session, and together they allow 120 requests a
+// minute per address, so all three are exactly the unauthenticated flood this
+// list exists to keep out of the table. None of them is a verdict about a run.
 const LOG_ONLY_REASONS = new Set([
   'rate_limited',
   'run_not_found',
@@ -46,6 +52,9 @@ const LOG_ONLY_REASONS = new Set([
   'origin_missing',
   'origin_mismatch',
   'content_type',
+  'invalid_mode',
+  'invalid_player_id',
+  'player_not_found',
 ]);
 
 // Genuine anti-cheat verdicts: each one means a request got past the wall, the

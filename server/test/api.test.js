@@ -383,6 +383,45 @@ test('waiting out a live run cannot buy a shorter claimed score', async (t) => {
   assert.equal(stream.of('cheat_detected')[0].data.reason, 'server clock manipulation');
 });
 
+// The claim is structurally smaller than the window the server timed: the client
+// deducts the challenge across a full round trip and the score POST waits on a
+// beat already in flight. On a slow link that adds up to seconds, and this is the
+// one run verdict that both names a cheat in the live feed and bans the run.
+// Being refused is survivable; being called a clock forger in front of everyone
+// for owning a phone is not, so the accusation waits for a shortfall latency
+// cannot produce. The refusal itself is unchanged.
+test('a claim only slightly short of the server window is refused without an accusation', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'faraway');
+  const client = ctx.clientFor('1');
+  const stream = ctx.collectFeed();
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  await solveChallenge(ctx, client, runId);
+
+  let token = created.json.chain;
+  for (let i = 0; i < 4; i += 1) {
+    ctx.clock.advance(5000);
+    ({ chain: token } = await sendBeat(client, runId, token, true));
+  }
+
+  // This fixture leaves 20500 ms of scored chase behind, so the claim is 4500 ms
+  // short: past the tolerance that accepts, nowhere near the one that accuses.
+  const claim = { runId, timeMs: 16000, misses: 0, nearMisses: 3, sus: 0 };
+  claim.sig = signClaim(claim);
+  const response = await client.post('/api/score', claim);
+  assert.equal(response.status, 400);
+  assert.equal(response.json.error, 'time_below_elapsed');
+  assert.equal((await client.get('/api/leaderboard?mode=practice')).json.entries.length, 0);
+
+  assert.equal(stream.of('cheat_detected').length, 0, 'no public accusation');
+  assert.equal(stream.of('run_failed').length, 0);
+  assert.equal((await ctx.store.getRun(runId)).failed, false,
+    'the run survives so the player can finish it');
+  assert.equal((await ctx.store.listRuns('1'))[0].failReason, null);
+});
+
 // The forgery that used to land rank 1 on both boards in seconds: claim the
 // mode floor, which is the best score anyone can hold, and note that the old
 // claim-driven rule demanded zero beats for exactly that claim.
@@ -2096,6 +2135,34 @@ test('a global per-address ceiling sheds a flood before any work happens', async
   assert.equal(await ctx.store.countRejections(), 0);
 });
 
+// A 429 the browser cannot read is worse than no answer: fetch rejects it as an
+// opaque network error, and js/net.js cannot tell that apart from an unreachable
+// host, so it marks the backend dead and tells the player the leaderboard is
+// offline while it is up and only asking them to slow down.
+test('a throttled response still carries the CORS headers the browser needs', async (t) => {
+  const ctx = await createContext({ globalIpLimit: 1 });
+  t.after(() => ctx.close());
+  const client = ctx.makeClient();
+
+  assert.equal((await client.get('/api/leaderboard?mode=practice')).status, 200);
+  const blocked = await client.get('/api/leaderboard?mode=practice');
+  assert.equal(blocked.status, 429);
+  assert.equal(
+    blocked.headers.get('access-control-allow-origin'),
+    ctx.config.gameOrigin,
+    'the game origin can read its own rate-limit answer',
+  );
+  assert.equal(blocked.headers.get('access-control-allow-credentials'), 'true');
+  assert.equal(blocked.json.error, 'rate_limited');
+
+  // Still one origin only: a throttled foreign caller gets no CORS grant.
+  const foreign = await fetch(`${ctx.base}/api/leaderboard?mode=practice`, {
+    headers: { Origin: 'https://evil.example' },
+  });
+  assert.equal(foreign.status, 429);
+  assert.equal(foreign.headers.get('access-control-allow-origin'), null);
+});
+
 test('Railway client identity ignores caller-controlled forwarding chains', async (t) => {
   const ctx = await createContext({ globalIpLimit: 1 });
   t.after(() => ctx.close());
@@ -2133,6 +2200,16 @@ test('the audit trail keeps verdicts and discards flood noise', async (t) => {
   const flagged = await playRun(ctx, ctx.clientFor('1'), 'practice', 20000, { sus: 3 });
   assert.equal(flagged.submitted.status, 422);
   assert.equal(await ctx.store.countRejections('client_flagged'), 1, 'verdicts are kept');
+
+  // The public read surface takes no session at all, so a stranger can provoke
+  // these three as fast as the limiter allows. None of them judges a run.
+  const anon = ctx.makeClient();
+  assert.equal((await anon.get('/api/leaderboard?mode=sandbox')).status, 400);
+  assert.equal((await anon.get('/api/player/not a player')).status, 400);
+  assert.equal((await anon.get('/api/player/999999')).status, 404);
+  assert.equal(await ctx.store.countRejections('invalid_mode'), 0);
+  assert.equal(await ctx.store.countRejections('invalid_player_id'), 0);
+  assert.equal(await ctx.store.countRejections('player_not_found'), 0);
 
   // The policy is explicit, and the two lists must never overlap.
   const { LOG_ONLY_REASONS, ALWAYS_PERSISTED_REASONS } = require('../recorder');

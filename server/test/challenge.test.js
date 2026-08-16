@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
 const zlib = require('node:zlib');
 
 const {
@@ -11,6 +13,20 @@ const {
   matchesAnswers,
   newChallengeSeed,
 } = require('../challenge');
+
+// js/chase.js refuses a challenge whose geometry it does not recognise, and a
+// refused challenge cannot be solved, so the client's constants are read out of
+// its source rather than restated here. Following test/client.test.js.
+const CHASE_SOURCE = fs.readFileSync(
+  path.join(path.resolve(__dirname, '..', '..'), 'js', 'chase.js'),
+  'utf8',
+);
+
+function clientNumber(name) {
+  const found = new RegExp(`\\b${name}\\s*=\\s*(\\d+)`).exec(CHASE_SOURCE);
+  assert.notEqual(found, null, `js/chase.js no longer declares ${name}`);
+  return Number(found[1]);
+}
 
 const RUN_ID = 'run_abcdefghijklmnopqrstuvwxyz123456';
 const SECRET = 'challenge-test-secret-that-is-not-public';
@@ -85,6 +101,40 @@ test('server challenge payload is deterministic raster data that omits its seed 
 
     const png = Buffer.from(round.scene.slice(round.scene.indexOf(',') + 1), 'base64');
     assert.equal(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  }
+});
+
+// The client validates the payload before it renders anything, and a challenge
+// it rejects can never be solved - which refuses the score of every ranked
+// player at once, silently, with the whole suite still green. So the generated
+// geometry is checked against the client's own acceptance window rather than
+// against the numbers this module happens to use. HOLE_BASES has y jitter of
+// +/-6 px and its lowest row sits 2 px clear of the floor, so nudging a base
+// down is exactly the edit this has to catch.
+test('every generated hole and start position is one the client will accept', () => {
+  assert.equal(CHALLENGE_ROUNDS, clientNumber('CAPTCHA_ROUNDS'));
+
+  const maxX = clientNumber('CAP_W') - clientNumber('CAP_PIECE');
+  const maxY = clientNumber('CAP_H') - clientNumber('CAP_PIECE');
+  assert.ok(maxX > 0 && maxY > 0, 'the client window has to have room for a piece');
+
+  // Enough runs to draw every value of the hole jitter, which is what makes
+  // this a bound on the generator and not a spot check on one seed.
+  for (let index = 0; index < 60; index += 1) {
+    const runId = `geometry-${index}`;
+    const seed = Buffer.alloc(32, index + 1).toString('base64url');
+    const payload = buildChallenge({ runId, seed, secret: SECRET });
+    assert.equal(payload.rounds.length, CHALLENGE_ROUNDS);
+
+    for (const round of payload.rounds) {
+      assert.equal(round.holes.length, 4, 'the client requires exactly four candidates');
+      for (const point of [...round.holes, round.start]) {
+        assert.ok(Number.isFinite(point.x) && point.x >= 0 && point.x <= maxX,
+          `x ${point.x} is outside 0..${maxX} on ${runId}`);
+        assert.ok(Number.isFinite(point.y) && point.y >= 0 && point.y <= maxY,
+          `y ${point.y} is outside 0..${maxY} on ${runId}`);
+      }
+    }
   }
 });
 
