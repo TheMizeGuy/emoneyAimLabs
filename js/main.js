@@ -213,12 +213,32 @@
       bestKey: SIMULATION.bestKey,
       modeLabel: 'SIMULATION',
       recordBest: !isSeam,
+      // V2.14: the ban screen's two buttons come back through here
+      onExit: onChaseExit,
       susSeed: (info && info.sus > 0) ? info.sus : 0,
       stateCheat: !!(info && info.stateCheat),
       // A non-null object tells the engine this module owns the audio. Either
       // field may still be null; pushAudio fills them in as they arrive.
       audio: { ctx: ctx, buffer: buffer }
     });
+  }
+
+  /* V2.14. A captcha ban ends the run; the player picks where to go next.
+     Retry restarts SIMULATION from the flappy gauntlet as a completely fresh
+     run, Home returns to the start screen. Either way the chase is torn down
+     first, which stops its audio and unbinds everything it owns. */
+  function onChaseExit(action) {
+    try { if (chase && chase.stop) chase.stop(); }
+    catch (e) { ERR('[AIMLAB] chase stop threw: ' + (e && e.message)); }
+    chase = null;
+    running = null;
+
+    if (action === 'retry') {
+      skipFlappy = false;             // a retry always starts at the gauntlet
+      startSimulation(true);          // the ban button click is the gesture
+      return;
+    }
+    startScreen.classList.remove('hide');
   }
 
   /* ---------------- router ---------------- */

@@ -16,9 +16,9 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "d60fdeb00d6d508c68abf3b8ea2fee16d2692e05aa567adbebea6100b1c00c50",
+  "js/chase.js": "ce933ae1247e3b28d546c32bdc22b55dc9c449da313a627babba70b233cc9313",
   "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
-  "js/main.js": "7a97a4c251eeec91557f67a4c0fa31e8f7e77cfcc09332ccc4b6247915c54a23"
+  "js/main.js": "bb045cbbfec923513a51fc2a58b9fbed1b58829644dd4a0140bbe6ea32af0eb2"
 }
 </script>
 <style>
@@ -722,6 +722,151 @@
     color: #3d3d3d;
     text-align: left;
   }
+
+  /* V2.14 countdown: Win95 sunken field, and it turns red in the last ten seconds. */
+  .capbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin: 12px 0 0;
+  }
+
+  .caplabel {
+    font-family: var(--w95);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: #3d3d3d;
+  }
+
+  .capclock {
+    min-width: 46px;
+    padding: 2px 6px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #c0c0c0;
+    font-family: var(--mono);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    color: #000;
+  }
+
+  .capclock.low { color: #b00000; }
+
+  /* ---- V2.14 ban screen ----
+     The mark is a parody, drawn here in CSS: a purple speech bubble with a
+     square tail and two offset colour ghosts for the glitch. No fetched asset,
+     no wordmark, nothing traced. */
+  .banbox {
+    position: fixed;
+    inset: 0;
+    z-index: 75;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: #0b0511;
+    text-align: center;
+  }
+
+  .banbox.hide { display: none; }
+  .baninner { width: min(520px, 100%); }
+
+  .banmark {
+    position: relative;
+    width: 96px;
+    height: 104px;
+    margin: 0 auto 26px;
+    background: #9146ff;
+    clip-path: polygon(0 0, 100% 0, 100% 74%, 62% 74%, 38% 100%, 38% 74%, 0 74%);
+    animation: banglitch 2.6s steps(1, end) infinite;
+  }
+
+  /* the two eyes of the bubble, drawn rather than imaged */
+  .banmark::before,
+  .banmark::after {
+    content: "";
+    position: absolute;
+    top: 26px;
+    width: 12px;
+    height: 30px;
+    background: #0b0511;
+  }
+
+  .banmark::before { left: 28px; }
+  .banmark::after  { left: 56px; }
+
+  /* the colour ghosts that sell the glitch */
+  .banmarktail {
+    position: absolute;
+    inset: 0;
+    background: #00e5ff;
+    clip-path: inherit;
+    mix-blend-mode: screen;
+    opacity: 0.55;
+    animation: banghost 2.6s steps(1, end) infinite;
+  }
+
+  @keyframes banglitch {
+    0%, 82%, 100% { transform: translate(0, 0); }
+    84% { transform: translate(-5px, 2px); }
+    88% { transform: translate(4px, -2px); }
+    92% { transform: translate(-2px, 0); }
+  }
+
+  @keyframes banghost {
+    0%, 82%, 100% { transform: translate(0, 0); opacity: 0; }
+    84% { transform: translate(6px, -3px); opacity: 0.6; }
+    88% { transform: translate(-7px, 2px); opacity: 0.5; }
+    92% { transform: translate(3px, 1px); opacity: 0.4; }
+  }
+
+  .bantitle {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: clamp(30px, 8vw, 62px);
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    line-height: 1.05;
+    color: #fff;
+    text-shadow: 3px 0 0 #9146ff, -3px 0 0 #00e5ff;
+  }
+
+  .bansub {
+    margin: 14px 0 30px;
+    font-family: var(--w95);
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    color: #b9a6d6;
+  }
+
+  .banbtns {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+  }
+
+  .banbtn {
+    min-width: 132px;
+    padding: 10px 18px;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    border-radius: 0;
+    box-shadow: inset 2px 2px 0 var(--w95-hilite), inset -2px -2px 0 var(--w95-shadow);
+    color: #000;
+    font-family: var(--w95);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .banbtn:active {
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+    box-shadow: inset 2px 2px 0 var(--w95-shadow), inset -2px -2px 0 var(--w95-hilite);
+  }
+
+  .banbtn:focus-visible { outline: 1px dotted #000; outline-offset: -5px; }
 
   /* Ruling 3: shown when the viewport is too small for the card to flee in.
      Blocks the playfield outright -- while it is up the run is frozen, the clock

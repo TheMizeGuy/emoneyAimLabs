@@ -193,7 +193,22 @@
     '<canvas class="capshot" data-el="capCanvas" width="260" height="150"></canvas>',
     '<canvas class="cappiece" data-el="capPiece" width="46" height="46"></canvas>',
     '</div>',
-    '<p class="capnote" data-el="capNote">Unlimited attempts. The clock is still running.</p>',
+    '<div class="capbar">',
+    '<span class="caplabel">TIME REMAINING</span>',
+    '<span class="capclock" data-el="capClock">60</span>',
+    '</div>',
+    '<p class="capnote">One attempt. Drop it wrong and you are done.</p>',
+    '</div>',
+    '</div>',
+    '</div>',
+    '<div class="banbox hide" data-el="banBox">',
+    '<div class="baninner">',
+    '<div class="banmark" aria-hidden="true"><span class="banmarktail"></span></div>',
+    '<p class="bantitle">INDEFINITE BAN</p>',
+    '<p class="bansub" data-el="banSub">Verification failed.</p>',
+    '<div class="banbtns">',
+    '<button class="banbtn" data-el="banRetry" type="button">Retry</button>',
+    '<button class="banbtn" data-el="banHome" type="button">Home</button>',
     '</div>',
     '</div>',
     '</div>',
@@ -272,6 +287,16 @@
     var AVOID_BRAKE     = 9.0;   // 1/s; cancels momentum that is closing on the cursor
     var SLIDE_LOOKAHEAD = 190;   // px along the tangent that must stay clear to commit
 
+    /* V2.15 -- per-mode difficulty compensation.
+       The simulation window is 320 px wide against practice's 136: it presents
+       2.4x the width to track, is easier to corner, and measured consistently
+       easier at every viewport. Rather than fork the tuning, the evasive terms
+       scale with how much wider than the practice card this window is, so both
+       modes land on the same difficulty with one set of constants. Practice is
+       the reference and its scale is exactly 1, so nothing about it changes. */
+    var DIFF_REF_W = 136;        // the practice window width
+    var DIFF_GAIN  = 0.13;       // how hard the compensation scales with excess width
+
     /* V2.11 -- the miss-click shockwave. Every whiff near the window shoves it
        away from the click point, hardest when you nearly had it. It is a
        velocity impulse, so the speed cap still bounds it and the wall clamp
@@ -283,9 +308,11 @@
     /* V2.12 -- the captcha interrupt. Simulation only, once per run. */
     var CAPTCHA_MIN_MS  = 5000;   // earliest the timer path can fire
     var CAPTCHA_MAX_MS  = 30000;  // latest
-    var CAPTCHA_MISSES  = 15;     // or this many misses, whichever comes first
+    var CAPTCHA_MISS_MIN = 15;    // or this many misses, rolled per run...
+    var CAPTCHA_MISS_MAX = 30;    // ...uniform in [MIN, MAX], whichever comes first
     var CAPTCHA_TOL     = 6;      // px the piece must land within
     var CAPTCHA_BEAT_MS = 450;    // success beat before the dialog closes
+    var CAPTCHA_LIMIT_MS = 60000; // V2.14: the countdown, and one drop only
     var CAP_W = 260, CAP_H = 150, CAP_PIECE = 46;
     var BOUNCE_JITTER      = 10 * Math.PI / 180;
     var PANIC_MS           = 260;
@@ -382,7 +409,6 @@
     var TAUNT_TOUCH    = 'Fingers do not close this one. A mouse does.';
     var TAUNT_TELEPORT = 'That cursor did not travel. Move the mouse like a person.';
     var TAUNT_CAMP     = 'Camping is not aiming. Go and get it.';
-    var TAUNT_CAPTCHA  = 'Not quite. The gap is the piece-shaped one.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
@@ -444,6 +470,11 @@
     var capScene  = el('capScene');
     var capCanvas = el('capCanvas');
     var capPiece  = el('capPiece');
+    var capClock  = el('capClock');
+    var banBox    = el('banBox');
+    var banSub    = el('banSub');
+    var banRetry  = el('banRetry');
+    var banHome   = el('banHome');
     /* These five were the only nodes in the file resolved by el() at use time
        rather than cached here. Both consumers null-guard, so dropping a
        data-el attribute in the elements panel made every write a silent no-op
@@ -510,12 +541,15 @@
     var dodgeSign = 1, dodgeAt = 0;
     // V2.9: live restitution, the held slide side, and the bait/jink cycle
     var restNow = RESTITUTION;
+    // computed once from the known geometry, before any physics runs
+    var diffScale = 1 + DIFF_GAIN * Math.max(0, (cardW - DIFF_REF_W) / DIFF_REF_W);
     // V2.10: is the cursor being aimed, or just sitting there?
     var campX = 0, campY = 0, campAt = -1e9, cursorParked = false;
 
     /* V2.12 captcha, all closure-local per V2.6 layer 1. */
     var CAPTCHA_ON = (MODE_LABEL === 'SIMULATION');
     var capFired = false, capShown = false, capAt = 0, capShownAt = 0, capBeatT = 0;
+    var capMissTarget = 0, capUsed = false, banned = false, capLeftShown = -1;
     var capTX = 0, capTY = 0, capHX = 0, capHY = 0, capPX = 0, capPY = 0;
     var capDrag = false, capDX = 0, capDY = 0, capL = 0, capT = 0;
     var slideSign = 1, slideAt = -1e9, slideHold = SLIDE_HOLD_MIN;
@@ -775,6 +809,9 @@
       simT = NOW();
       // V2.12: one captcha per run, at a random instant in [5, 30] s
       capAt = NOW() + CAPTCHA_MIN_MS + rnd() * (CAPTCHA_MAX_MS - CAPTCHA_MIN_MS);
+      // V2.14: the miss threshold is rolled per run, so it cannot be counted to
+      capMissTarget = CAPTCHA_MISS_MIN +
+        Math.floor(rnd() * (CAPTCHA_MISS_MAX - CAPTCHA_MISS_MIN + 1));
       LOG('[AIMLAB] START');
     }
 
@@ -784,7 +821,7 @@
       setText(elMiss, n);
       LOG('[AIMLAB] MISS n=' + n + (reason ? (' reason=' + reason) : ''));
       playError();
-      if (n >= CAPTCHA_MISSES) showCaptcha('misses');   // V2.12, whichever comes first
+      if (capMissTarget > 0 && n >= capMissTarget) showCaptcha('misses');
     }
 
     // V2.7 layer C keeps the near-miss counter behind the accessor as well; step()
@@ -1074,6 +1111,7 @@
       n += ensure(barEl, btn, null);
       n += ensure(barEl, barTitle, btn);
       n += ensure(root, capBox, null);
+      n += ensure(root, banBox, null);
       n += ensure(capScene, capCanvas, capPiece);
       n += ensure(capScene, capPiece, null);
       n += ensure(hudEl, rowSus, null);
@@ -1110,7 +1148,10 @@
       c.lineTo(ox + sz, oy + sz);
       c.lineTo(ox, oy + sz);
       c.lineTo(ox, oy + m + t);
-      c.arc(ox, oy + m, t, Math.PI / 2, -Math.PI / 2, false);        // notch, biting in
+      // anticlockwise, so this bites INTO the piece instead of bulging out past
+      // its left edge -- where it was being clipped off the 46px piece canvas
+      // entirely, leaving a hole 10px wider than the piece that fills it
+      c.arc(ox, oy + m, t, Math.PI / 2, -Math.PI / 2, true);         // notch, biting in
       c.closePath();
     }
 
@@ -1218,6 +1259,10 @@
       capFired = true;
       capShown = true;
       capShownAt = NOW();
+      capUsed = false;
+      capLeftShown = -1;
+      capClock.classList.remove('low');
+      setText(capClock, Math.round(CAPTCHA_LIMIT_MS / 1000));
       capBox.classList.remove('hide');
       dropPointer();                 // the card carries on as if the cursor had left
       LOG('[AIMLAB] CAPTCHA SHOWN reason=' + reason);
@@ -1231,8 +1276,43 @@
       capBox.classList.add('solved');
     }
 
+    /* V2.14. A failed verification ends the run: the audio stops, the captcha
+       closes and the ban overlay takes the screen. Neither button is a win path,
+       so neither is presence-gated -- any trusted click is enough. */
+    function banPlayer(reason) {
+      if (banned || won || stopped) return;
+      banned = true;
+      capShown = false;
+      capDrag = false;
+      capBeatT = 0;
+      capBox.classList.add('hide');
+      stopAudio();
+      killErrorVoices();
+      setText(banSub, (reason === 'captcha-timeout')
+        ? 'You ran out of time.' : 'That is not where the piece goes.');
+      banBox.classList.remove('hide');
+      LOG('[AIMLAB] BANNED reason=' + reason);
+    }
+
+    function banExit(action) {
+      if (typeof opts.onExit === 'function') {
+        try { opts.onExit(action); return; } catch (e) { /* fall through to reload */ }
+      }
+      window.location.reload();
+    }
+
+    on(banRetry, 'click', function (e) { if (e.isTrusted) banExit('retry'); });
+    on(banHome, 'click', function (e) { if (e.isTrusted) banExit('home'); });
+
     // called from frame(): closes the dialog after the success beat
     function capTick(now) {
+      if (capShown && capBeatT === 0 && !banned) {
+        var left = Math.ceil((CAPTCHA_LIMIT_MS - (now - capShownAt)) / 1000);
+        if (left < 0) left = 0;
+        if (left !== capLeftShown) { capLeftShown = left; setText(capClock, left); }
+        if (left <= 10) capClock.classList.add('low');
+        if (now - capShownAt >= CAPTCHA_LIMIT_MS) { banPlayer('captcha-timeout'); return; }
+      }
       if (capBeatT > 0 && now >= capBeatT) {
         capBeatT = 0;
         capShown = false;
@@ -1271,15 +1351,15 @@
     function capRelease(e) {
       if (!capDrag) return;
       capDrag = false;
+      if (capUsed) return;               // V2.14: exactly one drop, ever
+      capUsed = true;
       var dx = capPX - capTX, dy = capPY - capTY;
       if (Math.sqrt(dx * dx + dy * dy) <= CAPTCHA_TOL) {
         capPX = capTX; capPY = capTY;
         capPlace();
         solveCaptcha();
       } else {
-        capPX = capHX; capPY = capHY;      // snaps home; unlimited retries
-        capPlace();
-        showTaunt(TAUNT_CAPTCHA);
+        banPlayer('captcha-fail');        // no snap-back, no second try
       }
       if (e && e.preventDefault) e.preventDefault();
     }
@@ -1895,7 +1975,7 @@
           dodgeAt = now;
           dodgeSign = (rnd() < 0.5) ? -1 : 1;
         }
-        var dodge = dodgeSign * DODGE_GAIN * approach * p2;
+        var dodge = dodgeSign * DODGE_GAIN * diffScale * approach * p2;
         ax += -awy * dodge;
         ay += awx * dodge;
       }
@@ -1950,10 +2030,10 @@
             // both ways are through the cursor: peel off the wall and go around
             var outX = alongY ? ((dLeft <= dRight) ? 1 : -1) : 0;
             var outY = alongY ? 0 : ((dTop <= dBot) ? 1 : -1);
-            ax += outX * SLIDE_ACCEL * prox;
-            ay += outY * SLIDE_ACCEL * prox;
+            ax += outX * SLIDE_ACCEL * diffScale * prox;
+            ay += outY * SLIDE_ACCEL * diffScale * prox;
           } else {
-            var slide = SLIDE_ACCEL * prox * slideSign;
+            var slide = SLIDE_ACCEL * diffScale * prox * slideSign;
             if (alongY) ay += slide; else ax += slide;
           }
         }
@@ -1965,8 +2045,8 @@
          accelerations, so the motion stays continuous and nothing teleports. */
       if (cursorParked && cbd < AVOID_SOFT) {
         var av = (AVOID_SOFT - cbd) / AVOID_SOFT;
-        ax += cux * AVOID_ACCEL * av * av;
-        ay += cuy * AVOID_ACCEL * av * av;
+        ax += cux * AVOID_ACCEL * diffScale * av * av;
+        ay += cuy * AVOID_ACCEL * diffScale * av * av;
         var closing = -(vx * cux + vy * cuy);
         if (closing > 0) {
           ax += cux * closing * AVOID_BRAKE;
@@ -1982,7 +2062,7 @@
          unthreatened card still drifts at its lazy wander speed. */
       if (hasPointer && prox > FLOOR_PROX) {
         var spNow = Math.sqrt(vx * vx + vy * vy);
-        var spFloor = FLOOR_SPEED * prox;
+        var spFloor = FLOOR_SPEED * diffScale * prox;
         if (spNow > 1 && spNow < spFloor) {
           var boost = (spFloor - spNow) * FLOOR_GAIN;
           ax += (vx / spNow) * boost;
@@ -2010,7 +2090,7 @@
       }
       if (jinkUntil > 0) {
         if (now < jinkUntil) {
-          var jink = JINK_ACCEL * prox * jinkSign;
+          var jink = JINK_ACCEL * diffScale * prox * jinkSign;
           ax += -awy * jink;                    // hard across the cursor's line
           ay += awx * jink;
         } else {
@@ -2272,7 +2352,7 @@
     }
 
     function win() {
-      if (won) return;
+      if (won || banned) return;
       if (!started) startTimer();
       won = true;
       // every published number is read straight out of the closure (V2.6 layer 7),
