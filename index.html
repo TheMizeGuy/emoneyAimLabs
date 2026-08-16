@@ -399,7 +399,31 @@
     border-top: 2px solid var(--w95-light);
   }
 
-  .panel.hide { display: none; }
+  /* V3.9: the three tab panels share one grid cell, so the window is always
+     exactly as tall as the GAME panel no matter which tab is up -- switching
+     to the board or the stats no longer shrinks the whole card (or the log
+     window beside it, which rides this card's height). Hidden panels keep
+     their slot (visibility, not display) precisely so the tallest one still
+     sizes the cell. */
+  .panels { display: grid; }
+  .panels > .panel { grid-area: 1 / 1; }
+  .panel.hide { visibility: hidden; }
+
+  /* The two details-view panels stretch their white pane into whatever height
+     the GAME panel bought, instead of leaving dead face under the status bar.
+     Scoped under .panel: the win-dialog modal keeps its fixed-height list. */
+  #panelBoard,
+  #panelStats {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .panel .lblist {
+    flex: 1 1 0;
+    height: auto;
+    min-height: 244px;
+  }
 
   /* ---- Explorer details view ---- */
 
@@ -1788,6 +1812,7 @@
         <button class="tab" id="tabStats" type="button">STATS</button>
       </div>
 
+      <div class="panels">
       <div class="panel" id="panelGame">
         <div class="hero">
           <p class="herotitle">Relive the August 14th Incident</p>
@@ -1841,6 +1866,7 @@
           <div class="lbbody" id="statsList"></div>
         </div>
         <div class="lbstatus" id="statsStatus"></div>
+      </div>
       </div>
     </div>
   </div>
