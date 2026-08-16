@@ -82,6 +82,15 @@ const SCHEMA = [
      payload  jsonb,
      at       timestamptz NOT NULL
    )`,
+  // V3.7: the live feed's replay buffer, so a deploy no longer greets every
+  // page with an empty log. The id comes from the feed's own counter (seeded
+  // from MAX(id) at boot), which keeps SSE event ids monotonic across
+  // restarts; `at` lives inside data alongside everything else the line shows.
+  `CREATE TABLE IF NOT EXISTS feed_events (
+     id   bigint PRIMARY KEY,
+     type text NOT NULL,
+     data jsonb NOT NULL
+   )`,
   // Forward migrations for databases created before these columns existed.
   // Harmless on a fresh schema.
   'ALTER TABLE users ADD COLUMN IF NOT EXISTS runs_failed_total integer NOT NULL DEFAULT 0',

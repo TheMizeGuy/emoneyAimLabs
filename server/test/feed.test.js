@@ -85,6 +85,40 @@ test('the buffer is a ring: only the newest lines survive', () => {
   assert.deepEqual(eventsOf(s).map((e) => e.id), [3, 4, 5], 'ids are never reused by the trim');
 });
 
+test('a seeded feed replays stored history and its ids keep climbing', () => {
+  const saved = [];
+  const feed = createFeed({
+    now: () => 7,
+    save: (id, type, data) => { saved.push({ id, type, data }); },
+  });
+
+  // What a previous process life left in the store.
+  const n = feed.seed([
+    { id: 41, type: 'run_started', data: { n: 1, at: 5 } },
+    { id: 42, type: 'run_won', data: { n: 2, at: 6 } },
+  ]);
+  assert.equal(n, 2);
+
+  const s = sink();
+  feed.subscribe(s, 41);
+  assert.deepEqual(eventsOf(s).map((e) => e.id), [42], 'a live cursor still means what it meant');
+
+  // New events resume past the stored ids and reach the save hook stamped.
+  feed.emit('flappy_death', { n: 3 });
+  assert.deepEqual(eventsOf(s).map((e) => e.id), [42, 43]);
+  assert.deepEqual(saved, [{ id: 43, type: 'flappy_death', data: { n: 3, at: 7 } }]);
+
+  // Seeding is boot-only: a second call cannot rewrite a live buffer.
+  assert.equal(feed.seed([{ id: 1, type: 'run_won', data: {} }]), 0);
+});
+
+test('a save hook that throws or rejects never takes an emit down', () => {
+  const feed = createFeed({ now: () => 1, save: () => { throw new Error('disk gone'); } });
+  assert.equal(feed.emit('run_started', { n: 1 }), 0);
+  const rejecting = createFeed({ now: () => 1, save: () => Promise.reject(new Error('later')) });
+  assert.equal(rejecting.emit('run_started', { n: 1 }), 0);
+});
+
 test('emit still reports live deliveries only, and history has a default depth', () => {
   const feed = createFeed({ now: () => 1 });
   const s = sink();

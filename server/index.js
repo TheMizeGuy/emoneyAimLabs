@@ -24,7 +24,13 @@ async function main() {
 
   const store = createStore(pool);
   const now = () => new Date();
-  const feed = createFeed();
+  // The feed's replay buffer persists through the store and reloads at boot,
+  // so a deploy no longer empties the activity log (V3.7).
+  const feed = createFeed({
+    save: (id, type, data) => store.saveFeedEvent(id, type, data),
+  });
+  const seeded = feed.seed(await store.recentFeedEvents(50));
+  log(`feed seeded with ${seeded} stored events`);
   const limiter = createRateLimiter();
   const recorder = createRecorder({ store, config, now, log });
 

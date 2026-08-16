@@ -640,3 +640,32 @@ test('hostile strings are stored as data, never executed as SQL', async () => {
   assert.equal(await store.getRun("' OR 1=1 --"), null);
   await pool.end();
 });
+
+test('feed events round-trip the store, newest window only, oldest pruned', async () => {
+  const { pool, store } = await fixture();
+
+  await store.saveFeedEvent(1, 'run_started', { name: 'A', at: 100 });
+  await store.saveFeedEvent(2, 'run_won', { name: 'A', at: 200 });
+  await store.saveFeedEvent(3, 'flappy_death', { name: 'B', at: 300 });
+
+  // Oldest-first for replay, and the JSON payload survives intact.
+  assert.deepEqual(await store.recentFeedEvents(50), [
+    { id: 1, type: 'run_started', data: { name: 'A', at: 100 } },
+    { id: 2, type: 'run_won', data: { name: 'A', at: 200 } },
+    { id: 3, type: 'flappy_death', data: { name: 'B', at: 300 } },
+  ]);
+
+  // The limit takes the newest window, not the oldest.
+  assert.deepEqual((await store.recentFeedEvents(2)).map((e) => e.id), [2, 3]);
+
+  // A replayed id is ignored, not an error (the fire-and-forget hook retries nothing).
+  await store.saveFeedEvent(3, 'run_won', { name: 'C', at: 999 });
+  assert.equal((await store.recentFeedEvents(50)).length, 3);
+
+  // The retention prune trims everything far behind the newest write.
+  await store.saveFeedEvent(504, 'run_started', { name: 'D', at: 400 });
+  const kept = (await store.recentFeedEvents(50)).map((e) => e.id);
+  assert.ok(!kept.includes(1), 'id 1 fell past the retention cap');
+  assert.ok(kept.includes(504));
+  await pool.end();
+});

@@ -16,6 +16,8 @@ const RUN_HISTORY_LIMIT = 100;
 const RUN_STALE_MS = 90 * 1000;
 // The audit trail is for watching live attacks, not for keeping forever.
 const REJECTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+// Feed events kept beyond the replay window, so the prune never races a read.
+const FEED_RETENTION = 500;
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -586,6 +588,30 @@ function createStore(pool) {
     }));
   }
 
+  // V3.7: the feed's replay buffer, persisted so a deploy does not empty the
+  // activity log. Writes are fire-and-forget from the feed's point of view;
+  // the prune keeps the table at roughly the retention cap and nothing more.
+  async function saveFeedEvent(id, type, data) {
+    await pool.query(
+      'INSERT INTO feed_events (id, type, data) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING',
+      [id, type, JSON.stringify(data)],
+    );
+    await pool.query('DELETE FROM feed_events WHERE id <= $1', [id - FEED_RETENTION]);
+  }
+
+  async function recentFeedEvents(limit) {
+    const { rows } = await pool.query(
+      'SELECT id, type, data FROM feed_events ORDER BY id DESC LIMIT $1',
+      [limit],
+    );
+    // Newest-first out of the index, oldest-first for replay.
+    return rows.reverse().map((row) => ({
+      id: Number(row.id),
+      type: row.type,
+      data: typeof row.data === 'string' ? JSON.parse(row.data) : row.data,
+    }));
+  }
+
   return {
     upsertUser,
     getUser,
@@ -612,6 +638,8 @@ function createStore(pool) {
     failStaleRuns,
     applyBan,
     incrementFlappyFails,
+    saveFeedEvent,
+    recentFeedEvents,
   };
 }
 

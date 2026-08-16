@@ -237,17 +237,20 @@
 
     /* ---------------- tuning ---------------- */
     /* V2.2 retune: values marked (v1 N) were raised to make the chase harder.
-       Everything unmarked is the v1 value, unchanged. */
-    var FLEE_RADIUS        = 470;    // px, cursor -> nearest point of the card rect     (v1 300)
-    var FLEE_ACCEL         = 12500;   // px/s^2 at d = 0, scaled by (1 - d/R)^2
-    var DODGE_GAIN         = 5.4;    // perpendicular px/s^2 per px/s of cursor approach (v1 2.2)
+       V3.7 retune: launch-night reports said the window died in seconds, so
+       every evasive term below marked (v2 N) got 15-30 percent. The camping,
+       corner and resume guards are deliberately untouched -- harder to catch,
+       not harder to be treated fairly. Everything unmarked is v1, unchanged. */
+    var FLEE_RADIUS        = 520;    // px, cursor -> nearest point of the card rect     (v2 470)
+    var FLEE_ACCEL         = 15500;  // px/s^2 at d = 0, scaled by (1 - d/R)^2           (v2 12500)
+    var DODGE_GAIN         = 7.0;    // perpendicular px/s^2 per px/s of cursor approach (v2 5.4)
     var DODGE_APPROACH_CAP = 4200;   // px/s
     var DODGE_HOLD_MS      = 300;    // dodge sign stays put this long so the swerve reads as intent
-    var BASE_SPEED         = 190;    // px/s idle wander                                 (v1 150)
+    var BASE_SPEED         = 230;    // px/s idle wander                                 (v2 190)
     var WANDER_GAIN        = 4.0;    // 1/s, how hard wander steers velocity toward its target
-    var SPEED_CAP_FAR      = 2050;   //                                                  (v1 1600)
-    var SPEED_CAP_NEAR_ADD = 650;    // FAR + NEAR_ADD lands exactly on the hard cap      (v1 500)
-    var SPEED_CAP_HARD     = 2700;   // absolute ceiling, shame mode included             (v1 2100)
+    var SPEED_CAP_FAR      = 2350;   //                                                  (v2 2050)
+    var SPEED_CAP_NEAR_ADD = 750;    // FAR + NEAR_ADD lands exactly on the hard cap      (v2 650)
+    var SPEED_CAP_HARD     = 3100;   // absolute ceiling, shame mode included             (v2 2700)
     var RESTITUTION        = 0.93;   // bounce loss when nobody is threatening it         (v1 0.9)
 
     /* V2.9 -- the corner pocket is closed.
@@ -260,20 +263,20 @@
     var RESTITUTION_HOT    = 0.995;  // at prox 1: a threatened bounce loses almost nothing
     var SLIDE_PROX         = 0.30;   // cursor this close before the slide arms
     var SLIDE_BAND         = 150;    // px from a wall that counts as pinned
-    var SLIDE_ACCEL        = 7600;   // px/s^2 along the wall, scaled by prox
+    var SLIDE_ACCEL        = 8800;   // px/s^2 along the wall, scaled by prox            (v2 7600)
     var SLIDE_HOLD_MIN     = 250;    // ms; the side is held this long so it reads as intent
     var SLIDE_HOLD_MAX     = 350;
     var SLIDE_MIN_ROOM     = 90;     // px; never commit to a side with less room than this
     var BAIT_PROX_MIN      = 0.25;   // the bait only makes sense mid-approach
     var BAIT_PROX_MAX      = 0.80;
-    var BAIT_CHANCE        = 0.004;  // per sub-step, so about once every two seconds in range
+    var BAIT_CHANCE        = 0.006;  // per sub-step: a bait-jink every second-and-a-bit  (v2 0.004)
     var BAIT_MS            = 150;    // the lull that invites the flick
     var BAIT_DAMP          = 7.0;    // 1/s of velocity damping during the lull
     var JINK_MS            = 190;    // and the sidestep that answers it
-    var JINK_ACCEL         = 9500;   // px/s^2 perpendicular, scaled by prox
+    var JINK_ACCEL         = 11500;  // px/s^2 perpendicular, scaled by prox             (v2 9500)
     var BAIT_COOL_MS       = 900;    // no second bait until this clears
     var FLOOR_PROX         = 0.25;   // being threatened at all arms the no-loiter floor
-    var FLOOR_SPEED        = 2600;   // px/s it is pushed back up to, scaled by prox
+    var FLOOR_SPEED        = 2900;   // px/s it is pushed back up to, scaled by prox     (v2 2600)
     var FLOOR_GAIN         = 9.0;    // 1/s; smooth, so there is no visible speed step
 
     /* V2.10 -- camping and drive-by delivery.
@@ -306,7 +309,7 @@
        velocity impulse, so the speed cap still bounds it and the wall clamp
        still contains it. */
     var SHOCK_RANGE     = 350;   // px from the card rect; beyond this a miss does nothing
-    var SHOCK_IMPULSE   = 1250;  // px/s added at zero distance, scaled by (1 - d/range)^2
+    var SHOCK_IMPULSE   = 1600;  // px/s added at zero distance, scaled by (1 - d/range)^2 (v2 1250)
     var SHOCK_BURST_MS  = 600;   // brief burst that stacks with the taunt burst
 
     /* V2.12 -- the captcha interrupt. Simulation only, once per run. */
@@ -336,8 +339,8 @@
     var WAKE_ACCEL = 9000;   // px/s^2 straight away from the cursor
     var BOUNCE_JITTER      = 10 * Math.PI / 180;
     var PANIC_MS           = 260;
-    var PANIC_ACCEL        = 4000;
-    var PANIC_SPEED        = 900;
+    var PANIC_ACCEL        = 5000;                                              // (v2 4000)
+    var PANIC_SPEED        = 1100;                                              // (v2 900)
     var BURST_MS           = 1500;
     var BURST_MUL          = 1.6;
     // (v1/V2.6 had DT_MAX = 0.032 s here. V2.7 layer A replaced the variable

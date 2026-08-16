@@ -22,6 +22,10 @@ function createFeed(options = {}) {
   const keepAliveMs = options.keepAliveMs || KEEP_ALIVE_MS;
   const historySize = options.historySize || DEFAULT_HISTORY;
   const now = options.now || Date.now;
+  // V3.7: optional persistence hook, called fire-and-forget on every emit so
+  // the replay buffer can be reloaded after a restart (see seed below). A
+  // failed write costs one line of history, never a request.
+  const save = options.save || null;
   // Insertion-ordered, so the oldest connection is the first one dropped.
   const clients = new Set();
   // The recent past, newest last. Frames are prebuilt: replay is a plain
@@ -88,15 +92,40 @@ function createFeed(options = {}) {
     return () => drop(res);
   }
 
+  function frameOf(id, type, stamped) {
+    return `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(stamped)}\n\n`;
+  }
+
+  // V3.7: reload the buffer from storage at boot, BEFORE the server listens.
+  // Entries arrive oldest first with the ids they were saved under, and the
+  // counter resumes past them, so ids stay monotonic across restarts and a
+  // held cursor keeps meaning what it meant.
+  function seed(entries) {
+    if (seq !== 0 || history.length > 0) return 0;   // boot-only, never a merge
+    for (const entry of entries.slice(-historySize)) {
+      history.push({ seq: entry.id, frame: frameOf(entry.id, entry.type, entry.data) });
+      seq = entry.id;
+    }
+    return history.length;
+  }
+
   function emit(type, data) {
     seq += 1;
     // Stamped here so a replayed line can say when it actually happened
     // rather than when the viewer connected.
-    const frame = `id: ${seq}\nevent: ${type}\ndata: ${JSON.stringify({ ...data, at: now() })}\n\n`;
+    const stamped = { ...data, at: now() };
+    const frame = frameOf(seq, type, stamped);
     // History is written even with an empty room: what happened while nobody
     // watched is exactly what the next page load wants to see.
     history.push({ seq, frame });
     if (history.length > historySize) history.shift();
+    if (save) {
+      try {
+        Promise.resolve(save(seq, type, stamped)).catch(() => {});
+      } catch {
+        // A throwing hook must never take a request down with it.
+      }
+    }
     if (clients.size === 0) return 0;
     let delivered = 0;
     for (const client of [...clients]) {
@@ -118,6 +147,7 @@ function createFeed(options = {}) {
   return {
     subscribe,
     emit,
+    seed,
     closeAll,
     size: () => clients.size,
     maxClients,
