@@ -144,9 +144,8 @@
   var beatTimer = 0;
   var inChase = false;             // V3.3: beats carry this once the chase is live
   var BEAT_MS = 5000;
-  /* V3.6: the board is simulation-only, so there is no mode state to keep.
-     Practice runs still record and still travel the activity feed; they just
-     never make the list. */
+  /* V3.6: practice runs still record and still travel the activity feed;
+     they just never make the board, which only ever shows simulation. */
 
   var acctLogin = document.getElementById('btnLogin');
   var acctIn = document.getElementById('acctIn');

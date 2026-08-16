@@ -18,8 +18,8 @@
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
   "js/chase.js": "45452ba99c454589ace3e83f8f302762c679ce6ffbb2efe093d332a04775c501",
   "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
-  "js/net.js": "00579d48161540be613be3ffc3236c97c00ee609e4e87082a9a1e25d45f9af17",
-  "js/main.js": "2fecafbbc49a65320db7fb32b048638def4f8b15be5c264085d556d3d2f661a8"
+  "js/net.js": "de832aabc10a51cd08ca033915e8b1fce9db01d4bac4aa87c19100bd228faacd",
+  "js/main.js": "55580d78afb1f92dd5e6ff3d32a2a9a773ac1762f8fd3d34b0c7e60becb62655"
 }
 </script>
 <style>
@@ -1799,12 +1799,12 @@
   <!-- V3.6: the public activity feed, its own window docked beside the menu so
        the log gets the menu's full height. Fed by SSE; quiet when the stream
        is not up. -->
-  <aside class="feedcard">
+  <aside class="feedcard" aria-labelledby="feedTitle">
     <div class="startbar"><span class="startbartitle">EVENTVWR.EXE</span></div>
     <div class="feedbody">
       <div class="feed">
         <div class="feedhead">
-          <span class="feedtitle">Activity Log</span>
+          <span class="feedtitle" id="feedTitle">Activity Log</span>
           <span class="feedstate" id="feedState">Connecting...</span>
         </div>
         <div class="feedlist" id="feedList"></div>

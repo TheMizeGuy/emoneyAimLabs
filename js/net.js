@@ -250,11 +250,8 @@
     function connect() {
       if (dead) return;
       state('connecting');
-      /* V3.6: the server replays its recent history on connect, so the log is
-         never empty just because the page is fresh. A reconnect names the last
-         line it saw and gets only the gap -- the Last-Event-ID header would do
-         this for free, but it only travels on the browser's own retry, and the
-         retry here is ours (a fresh EventSource each attempt). */
+      /* V3.6: the retry is ours (a fresh EventSource each attempt), so the
+         replay cursor rides the query string; why is explained at the route. */
       var url = API_BASE + '/api/feed';
       if (lastId) url += '?after=' + encodeURIComponent(lastId);
       try { es = new ES(url); } catch (e) { stop(); state('offline'); return; }

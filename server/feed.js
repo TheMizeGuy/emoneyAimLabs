@@ -66,6 +66,10 @@ function createFeed(options = {}) {
   // recent past beyond it replays immediately, so a fresh page load never
   // opens onto an empty log and a reconnect never sees a line twice.
   function subscribe(res, after = 0) {
+    // A cursor beyond our own counter is from a previous process life (the
+    // counter restarts on deploy); everything in this buffer is news to that
+    // client, so replay from the top rather than starving it.
+    if (after > seq) after = 0;
     if (clients.size >= maxClients) {
       const oldest = clients.values().next().value;
       if (oldest) drop(oldest);

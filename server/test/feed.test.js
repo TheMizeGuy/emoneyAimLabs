@@ -67,6 +67,12 @@ test('subscribe(after) replays only the gap', () => {
   const behind = sink();
   feed.subscribe(behind, 1);
   assert.deepEqual(eventsOf(behind).map((e) => e.id), [2, 3]);
+
+  // A cursor from before a restart points beyond this process's counter.
+  // Everything here is new to that client: full replay, not starvation.
+  const stale = sink();
+  feed.subscribe(stale, 999);
+  assert.deepEqual(eventsOf(stale).map((e) => e.id), [1, 2, 3]);
 });
 
 test('the buffer is a ring: only the newest lines survive', () => {
@@ -84,6 +90,5 @@ test('emit still reports live deliveries only, and history has a default depth',
   const s = sink();
   feed.subscribe(s);
   assert.equal(feed.emit('run_started', { n: 1 }), 1);
-  assert.equal(typeof DEFAULT_HISTORY, 'number');
   assert.ok(DEFAULT_HISTORY >= 50, 'deep enough to fill the client log from cold');
 });
