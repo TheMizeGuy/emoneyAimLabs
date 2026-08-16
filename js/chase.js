@@ -184,6 +184,19 @@
     '</div>',
     '</div>',
     '</div>',
+    '<div class="capbox hide" data-el="capBox">',
+    '<div class="ovcard">',
+    '<div class="ovbar"><span class="ovbartitle">eMoney Security Center</span></div>',
+    '<div class="ovbody">',
+    '<p class="captext">Prove you are not a robot.<br>Drag the piece into the gap.</p>',
+    '<div class="capscene" data-el="capScene">',
+    '<canvas class="capshot" data-el="capCanvas" width="260" height="150"></canvas>',
+    '<canvas class="cappiece" data-el="capPiece" width="46" height="46"></canvas>',
+    '</div>',
+    '<p class="capnote" data-el="capNote">Unlimited attempts. The clock is still running.</p>',
+    '</div>',
+    '</div>',
+    '</div>',
     '<div class="pausebox hide" data-el="pauseBox">',
     '<div class="ovcard">',
     '<div class="ovbar"><span class="ovbartitle">eMoney.exe</span></div>',
@@ -208,7 +221,7 @@
        set are in the shell-integrator blackboard. */
     var FLEE_RADIUS        = 470;    // px, cursor -> nearest point of the card rect     (v1 300)
     var FLEE_ACCEL         = 12500;   // px/s^2 at d = 0, scaled by (1 - d/R)^2
-    var DODGE_GAIN         = 3.2;    // perpendicular px/s^2 per px/s of cursor approach (v1 2.2)
+    var DODGE_GAIN         = 5.4;    // perpendicular px/s^2 per px/s of cursor approach (v1 2.2)
     var DODGE_APPROACH_CAP = 4200;   // px/s
     var DODGE_HOLD_MS      = 300;    // dodge sign stays put this long so the swerve reads as intent
     var BASE_SPEED         = 190;    // px/s idle wander                                 (v1 150)
@@ -241,8 +254,39 @@
     var JINK_ACCEL         = 9500;   // px/s^2 perpendicular, scaled by prox
     var BAIT_COOL_MS       = 900;    // no second bait until this clears
     var FLOOR_PROX         = 0.25;   // being threatened at all arms the no-loiter floor
-    var FLOOR_SPEED        = 1150;   // px/s it is pushed back up to, scaled by prox
-    var FLOOR_GAIN         = 7.0;    // 1/s; smooth, so there is no visible speed step
+    var FLOOR_SPEED        = 2600;   // px/s it is pushed back up to, scaled by prox
+    var FLOOR_GAIN         = 9.0;    // 1/s; smooth, so there is no visible speed step
+
+    /* V2.10 -- camping and drive-by delivery.
+       V2.9's slides are fast and deterministic, which turned out to mean they
+       would run the X underneath a cursor that was simply sitting there, and the
+       2 px presence-snap then armed the win. Two answers, and the important part
+       of both is that they are scoped to a cursor that is NOT being aimed: an
+       actively moving player gets exactly the game they had before. */
+    var SNAP_STALE_MS   = 1500;  // the 2 px snap only arms this soon after a real move
+    var CAMP_RADIUS     = 60;    // px the cursor must stay inside...
+    var CAMP_MS         = 1000;  // ...for this long before it counts as camped
+    var AVOID_SOFT      = 180;   // px of clearance the card steers for while camped
+    var AVOID_HARD      = 150;   // px the X is never carried inside while camped
+    var AVOID_ACCEL     = 15000; // px/s^2 of repulsion at contact
+    var AVOID_BRAKE     = 9.0;   // 1/s; cancels momentum that is closing on the cursor
+    var SLIDE_LOOKAHEAD = 190;   // px along the tangent that must stay clear to commit
+
+    /* V2.11 -- the miss-click shockwave. Every whiff near the window shoves it
+       away from the click point, hardest when you nearly had it. It is a
+       velocity impulse, so the speed cap still bounds it and the wall clamp
+       still contains it. */
+    var SHOCK_RANGE     = 350;   // px from the card rect; beyond this a miss does nothing
+    var SHOCK_IMPULSE   = 1250;  // px/s added at zero distance, scaled by (1 - d/range)^2
+    var SHOCK_BURST_MS  = 600;   // brief burst that stacks with the taunt burst
+
+    /* V2.12 -- the captcha interrupt. Simulation only, once per run. */
+    var CAPTCHA_MIN_MS  = 5000;   // earliest the timer path can fire
+    var CAPTCHA_MAX_MS  = 30000;  // latest
+    var CAPTCHA_MISSES  = 15;     // or this many misses, whichever comes first
+    var CAPTCHA_TOL     = 6;      // px the piece must land within
+    var CAPTCHA_BEAT_MS = 450;    // success beat before the dialog closes
+    var CAP_W = 260, CAP_H = 150, CAP_PIECE = 46;
     var BOUNCE_JITTER      = 10 * Math.PI / 180;
     var PANIC_MS           = 260;
     var PANIC_ACCEL        = 4000;
@@ -337,6 +381,8 @@
     var TAUNT_BUILD    = 'This build has been modified. He noticed.';
     var TAUNT_TOUCH    = 'Fingers do not close this one. A mouse does.';
     var TAUNT_TELEPORT = 'That cursor did not travel. Move the mouse like a person.';
+    var TAUNT_CAMP     = 'Camping is not aiming. Go and get it.';
+    var TAUNT_CAPTCHA  = 'Not quite. The gap is the piece-shaped one.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
@@ -394,6 +440,10 @@
     var elOvSus   = el('ovSus');
     var cheatText = el('cheatText');
     var pauseBox  = el('pauseBox');
+    var capBox    = el('capBox');
+    var capScene  = el('capScene');
+    var capCanvas = el('capCanvas');
+    var capPiece  = el('capPiece');
     /* These five were the only nodes in the file resolved by el() at use time
        rather than cached here. Both consumers null-guard, so dropping a
        data-el attribute in the elements panel made every write a silent no-op
@@ -460,6 +510,14 @@
     var dodgeSign = 1, dodgeAt = 0;
     // V2.9: live restitution, the held slide side, and the bait/jink cycle
     var restNow = RESTITUTION;
+    // V2.10: is the cursor being aimed, or just sitting there?
+    var campX = 0, campY = 0, campAt = -1e9, cursorParked = false;
+
+    /* V2.12 captcha, all closure-local per V2.6 layer 1. */
+    var CAPTCHA_ON = (MODE_LABEL === 'SIMULATION');
+    var capFired = false, capShown = false, capAt = 0, capShownAt = 0, capBeatT = 0;
+    var capTX = 0, capTY = 0, capHX = 0, capHY = 0, capPX = 0, capPY = 0;
+    var capDrag = false, capDX = 0, capDY = 0, capL = 0, capT = 0;
     var slideSign = 1, slideAt = -1e9, slideHold = SLIDE_HOLD_MIN;
     var baitUntil = 0, jinkUntil = 0, jinkSign = 1, baitCoolUntil = 0;
     var overlapping = false, panicUntil = 0;
@@ -715,6 +773,8 @@
       startWall = WALL();
       startWall2 = wall2();
       simT = NOW();
+      // V2.12: one captcha per run, at a random instant in [5, 30] s
+      capAt = NOW() + CAPTCHA_MIN_MS + rnd() * (CAPTCHA_MAX_MS - CAPTCHA_MIN_MS);
       LOG('[AIMLAB] START');
     }
 
@@ -724,6 +784,7 @@
       setText(elMiss, n);
       LOG('[AIMLAB] MISS n=' + n + (reason ? (' reason=' + reason) : ''));
       playError();
+      if (n >= CAPTCHA_MISSES) showCaptcha('misses');   // V2.12, whichever comes first
     }
 
     // V2.7 layer C keeps the near-miss counter behind the accessor as well; step()
@@ -1012,6 +1073,9 @@
       n += ensure(cardin, shotEl, null);
       n += ensure(barEl, btn, null);
       n += ensure(barEl, barTitle, btn);
+      n += ensure(root, capBox, null);
+      n += ensure(capScene, capCanvas, capPiece);
+      n += ensure(capScene, capPiece, null);
       n += ensure(hudEl, rowSus, null);
       n += ensure(rowSus, elSus, null);
       n += ensure(ovWin, elOvTime, elOvNote);
@@ -1024,6 +1088,204 @@
       sus('structure');
       showTaunt(TAUNT_GEOM);
     }
+
+    /* ---------------- V2.12: the captcha interrupt ----------------
+       Simulation only, once per run, on whichever comes first: a random instant
+       in [5, 30] s, or the fifteenth miss. While it is up the playfield is
+       shielded -- no pointer reaches the game, the X is inert and the card
+       wanders as though the cursor had left the window -- but the run timer
+       deliberately keeps going. Every pixel of it is drawn here; nothing is
+       fetched and no real security product is named or imitated.
+
+       The jigsaw outline: a square with a tab on the right edge and a matching
+       notch on the left, so the piece reads as a puzzle piece at 46 px. */
+    function capPath(c, ox, oy, sz) {
+      var t = sz * 0.22;                       // tab radius
+      var m = sz * 0.5;
+      c.beginPath();
+      c.moveTo(ox, oy);
+      c.lineTo(ox + sz, oy);
+      c.lineTo(ox + sz, oy + m - t);
+      c.arc(ox + sz, oy + m, t, -Math.PI / 2, Math.PI / 2, false);   // tab, bulging right
+      c.lineTo(ox + sz, oy + sz);
+      c.lineTo(ox, oy + sz);
+      c.lineTo(ox, oy + m + t);
+      c.arc(ox, oy + m, t, Math.PI / 2, -Math.PI / 2, false);        // notch, biting in
+      c.closePath();
+    }
+
+    // A small original scene: sky wash, hills, a low sun and a few windows.
+    function capDrawScene(c, w, h) {
+      var g = c.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, '#2b4a7a');
+      g.addColorStop(0.55, '#6f86a8');
+      g.addColorStop(1, '#c8b48a');
+      c.fillStyle = g;
+      c.fillRect(0, 0, w, h);
+
+      c.fillStyle = '#f0d9a0';
+      c.beginPath();
+      c.arc(w * 0.74, h * 0.34, 16, 0, Math.PI * 2);
+      c.fill();
+
+      c.fillStyle = '#3c5570';
+      c.beginPath();
+      c.moveTo(0, h * 0.72);
+      c.lineTo(w * 0.28, h * 0.48);
+      c.lineTo(w * 0.52, h * 0.72);
+      c.closePath();
+      c.fill();
+
+      c.fillStyle = '#31485f';
+      c.beginPath();
+      c.moveTo(w * 0.34, h * 0.74);
+      c.lineTo(w * 0.66, h * 0.44);
+      c.lineTo(w, h * 0.74);
+      c.closePath();
+      c.fill();
+
+      c.fillStyle = '#243544';
+      c.fillRect(0, h * 0.72, w, h * 0.28);
+      for (var i = 0; i < 7; i++) {
+        var bx = 12 + i * 36, bh = 18 + ((i * 37) % 5) * 7;
+        c.fillStyle = '#1b2836';
+        c.fillRect(bx, h * 0.72 - bh, 24, bh);
+        c.fillStyle = '#e8c96a';
+        for (var r = 0; r < Math.floor(bh / 9); r++) {
+          if ((i + r) % 3 === 0) continue;
+          c.fillRect(bx + 5, h * 0.72 - bh + 4 + r * 9, 5, 5);
+          c.fillRect(bx + 14, h * 0.72 - bh + 4 + r * 9, 5, 5);
+        }
+      }
+    }
+
+    function capBuild() {
+      if (!capCanvas || !capPiece || !capCanvas.getContext) return false;
+      var c = capCanvas.getContext('2d');
+      var pc = capPiece.getContext('2d');
+      if (!c || !pc) return false;
+
+      // clean copy first, so the piece can be cut from an unpunched scene
+      var off = document.createElement('canvas');
+      off.width = CAP_W; off.height = CAP_H;
+      var oc = off.getContext('2d');
+      if (!oc) return false;
+      capDrawScene(oc, CAP_W, CAP_H);
+
+      // where the gap goes, and where the piece starts out
+      capTX = Math.round(80 + rnd() * (CAP_W - CAP_PIECE - 100));
+      capTY = Math.round(18 + rnd() * (CAP_H - CAP_PIECE - 36));
+      capHX = 6;
+      capHY = Math.round(CAP_H - CAP_PIECE - 8);
+      capPX = capHX; capPY = capHY;
+
+      c.clearRect(0, 0, CAP_W, CAP_H);
+      c.drawImage(off, 0, 0);
+      c.save();
+      capPath(c, capTX, capTY, CAP_PIECE);
+      c.fillStyle = 'rgba(10, 16, 24, 0.82)';
+      c.fill();
+      c.strokeStyle = '#0a1018';
+      c.lineWidth = 1;
+      c.stroke();
+      c.restore();
+
+      pc.clearRect(0, 0, CAP_PIECE, CAP_PIECE);
+      pc.save();
+      capPath(pc, 0, 0, CAP_PIECE);
+      pc.clip();
+      pc.drawImage(off, -capTX, -capTY);
+      pc.restore();
+      pc.save();
+      capPath(pc, 0, 0, CAP_PIECE);
+      pc.strokeStyle = '#ffffff';
+      pc.lineWidth = 1;
+      pc.stroke();
+      pc.restore();
+
+      capPlace();
+      return true;
+    }
+
+    function capPlace() {
+      capPiece.style.left = capPX + 'px';
+      capPiece.style.top = capPY + 'px';
+    }
+
+    function showCaptcha(reason) {
+      if (!CAPTCHA_ON || capFired || capShown || won || stopped) return;
+      if (!capBuild()) { capFired = true; return; }   // no canvas, no captcha
+      capFired = true;
+      capShown = true;
+      capShownAt = NOW();
+      capBox.classList.remove('hide');
+      dropPointer();                 // the card carries on as if the cursor had left
+      LOG('[AIMLAB] CAPTCHA SHOWN reason=' + reason);
+    }
+
+    function solveCaptcha() {
+      if (!capShown) return;
+      LOG('[AIMLAB] CAPTCHA SOLVED ms=' + Math.round(NOW() - capShownAt));
+      capBeatT = NOW() + CAPTCHA_BEAT_MS;
+      capPiece.classList.add('solved');
+      capBox.classList.add('solved');
+    }
+
+    // called from frame(): closes the dialog after the success beat
+    function capTick(now) {
+      if (capBeatT > 0 && now >= capBeatT) {
+        capBeatT = 0;
+        capShown = false;
+        capDrag = false;
+        capBox.classList.add('hide');
+        capBox.classList.remove('solved');
+        capPiece.classList.remove('solved');
+      }
+    }
+
+    // Trusted pointer only, so a dispatched drag solves nothing. Touch is
+    // welcome here: solving the captcha is not winning the game.
+    on(capPiece, 'pointerdown', function (e) {
+      if (!capShown || capBeatT > 0 || !e.isTrusted) return;
+      var r = boxOf(capScene);
+      capL = r.left; capT = r.top;
+      capDX = e.clientX - (capL + capPX);
+      capDY = e.clientY - (capT + capPY);
+      capDrag = true;
+      try { capPiece.setPointerCapture(e.pointerId); } catch (err) { /* unsupported */ }
+      e.preventDefault();
+    });
+
+    on(capPiece, 'pointermove', function (e) {
+      if (!capDrag || !e.isTrusted) return;
+      capPX = e.clientX - capL - capDX;
+      capPY = e.clientY - capT - capDY;
+      if (capPX < 0) capPX = 0;
+      if (capPY < 0) capPY = 0;
+      if (capPX > CAP_W - CAP_PIECE) capPX = CAP_W - CAP_PIECE;
+      if (capPY > CAP_H - CAP_PIECE) capPY = CAP_H - CAP_PIECE;
+      capPlace();
+      e.preventDefault();
+    });
+
+    function capRelease(e) {
+      if (!capDrag) return;
+      capDrag = false;
+      var dx = capPX - capTX, dy = capPY - capTY;
+      if (Math.sqrt(dx * dx + dy * dy) <= CAPTCHA_TOL) {
+        capPX = capTX; capPY = capTY;
+        capPlace();
+        solveCaptcha();
+      } else {
+        capPX = capHX; capPY = capHY;      // snaps home; unlimited retries
+        capPlace();
+        showTaunt(TAUNT_CAPTCHA);
+      }
+      if (e && e.preventDefault) e.preventDefault();
+    }
+
+    on(capPiece, 'pointerup', capRelease);
+    on(capPiece, 'pointercancel', capRelease);
 
     // Reversible, and it never stops play: the card just gets ruder.
     function enterShame() {
@@ -1295,6 +1557,7 @@
     }
 
     on(window, 'pointermove', function (e) {
+      if (capShown) return;                 // V2.12: the playfield is shielded
       var t = NOW();
       setPointer(e.clientX, e.clientY, t);
       // V2.7 layer B: only a trusted move is evidence that a pointer is really
@@ -1307,6 +1570,7 @@
     }, { passive: true });
 
     on(window, 'pointerdown', function (e) {
+      if (capShown) return;                 // V2.12: the playfield is shielded
       setPointer(e.clientX, e.clientY, NOW());
       if (!e.isTrusted) return;
       // which device is behind the click that is about to be judged (V2.7 item 1)
@@ -1320,14 +1584,14 @@
 
     on(window, 'touchstart', function (e) {
       var t0 = e.touches[0];
-      if (!t0) return;
+      if (!t0 || capShown) return;
       if (e.isTrusted) sawTouch = true;
       setPointer(t0.clientX, t0.clientY, NOW());
     }, { passive: true });
 
     on(window, 'touchmove', function (e) {
       var t0 = e.touches[0];
-      if (!t0) return;
+      if (!t0 || capShown) return;
       setPointer(t0.clientX, t0.clientY, NOW());
       if (e.cancelable) e.preventDefault();
     }, { passive: false });
@@ -1343,17 +1607,19 @@
     // ancestor. A card moving at 2000 px/s would slide out from under a genuine press, so a
     // trusted press that lands on the X latches the card still until the pointer is released.
     on(btn, 'pointerdown', function (e) {
-      if (won || paused || !e.isTrusted) return;
+      if (won || paused || capShown || !e.isTrusted) return;   // the X is inert behind the captcha
 
       // V2.7 layer B. A mouse cannot press where it is not: the browser streams a
       // pointermove to every position the cursor passes through, so the last
       // trusted move is always at the press point. Touch and pen are exempt -- a
       // tap legitimately arrives with nothing in front of it.
-      if (e.pointerType === 'mouse' && !presenceOK(e.clientX, e.clientY)) {
+      var refused = (e.pointerType === 'mouse') ? presenceBlock(e.clientX, e.clientY) : '';
+      if (refused) {
         if (e.button === 0) presenceBlockAt = NOW();   // only a primary press makes a click
-        addMiss('presence');
-        sus('presence');
-        showTaunt(TAUNT_PRESENCE);
+        addMiss(refused);
+        // camping is bad play, not tampering, so it costs a miss but never a sus point
+        if (refused !== 'camping') sus(refused);
+        showTaunt(refused === 'camping' ? TAUNT_CAMP : TAUNT_PRESENCE);
         return;                    // no latch either: the window keeps running
       }
 
@@ -1392,12 +1658,17 @@
       LOG('[AIMLAB] CHEAT kind=' + kind);
     }
 
-    function presenceOK(cx, cy) {
-      if (moveT <= -1e8) return false;          // no trusted mouse movement at all yet
+    /* Returns '' to allow the press, or the reason it was refused. V2.10 bounds
+       the snap branch by age: resting a hand mid-play is fine, parking the
+       cursor and waiting for the window to arrive under it is not. The active
+       350 ms / 150 px branch is unchanged. */
+    function presenceBlock(cx, cy) {
+      if (moveT <= -1e8) return 'presence';     // no trusted mouse movement at all yet
       var dx = cx - moveX, dy = cy - moveY;
       var dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist <= PRESENCE_SNAP) return true;
-      return (NOW() - moveT) <= PRESENCE_MS && dist <= PRESENCE_PX;
+      var age = NOW() - moveT;
+      if (dist <= PRESENCE_SNAP) return (age <= SNAP_STALE_MS) ? '' : 'camping';
+      return (age <= PRESENCE_MS && dist <= PRESENCE_PX) ? '' : 'presence';
     }
 
     function releaseLatch() { pressLatch = false; }
@@ -1434,7 +1705,7 @@
     });
 
     on(window, 'click', function (e) {
-      if (won || paused) return;
+      if (won || paused || capShown) return;
 
       // The engine's own dialogs are not the playfield. Dismissing the shame box
       // used to cost the player a miss and an error chord for a dialog the game
@@ -1480,6 +1751,7 @@
       }
 
       addMiss();
+      shockwave(e.clientX, e.clientY);
       if (card.contains(e.target)) {
         showTaunt(TAUNTS[Math.floor(rnd() * TAUNTS.length) % TAUNTS.length]);
         burstUntil = NOW() + BURST_MS;
@@ -1487,6 +1759,38 @@
         if (s > 1) { vx *= BURST_MUL; vy *= BURST_MUL; }
       }
     }, true);
+
+    /* V2.11. Radial impulse away from where the click landed, measured to the
+       nearest point of the card rect so a whiff that grazed the frame hits
+       hardest. Added to velocity rather than to position: the cap in step()
+       still bounds the result and the wall clamp still contains it, so no
+       amount of click-spam can push the window off screen.
+
+       Known tradeoff, accepted: this is a crude steering tool -- a player can
+       shove the card away from where they do not want it. It costs a miss every
+       time and it makes the card faster, which makes it harder to catch, so
+       using it as steering is paying to make your own job worse. */
+    function shockwave(cx, cy) {
+      if (won || paused || stopped) return;
+      var hw = cardW / 2, hh = cardH / 2;
+      var gx = (cx < x - hw) ? (x - hw - cx) : ((cx > x + hw) ? (cx - x - hw) : 0);
+      var gy = (cy < y - hh) ? (y - hh - cy) : ((cy > y + hh) ? (cy - y - hh) : 0);
+      var dist = Math.sqrt(gx * gx + gy * gy);
+      if (dist >= SHOCK_RANGE) return;
+
+      var k = 1 - dist / SHOCK_RANGE;
+      var mag = SHOCK_IMPULSE * k * k;
+      var ox = x - cx, oy = y - cy;
+      var ol = Math.sqrt(ox * ox + oy * oy);
+      if (ol > 1e-6) { ox /= ol; oy /= ol; }
+      else { ox = Math.cos(heading); oy = Math.sin(heading); }
+
+      vx += ox * mag;
+      vy += oy * mag;
+      var bt = NOW() + SHOCK_BURST_MS;
+      if (bt > burstUntil) burstUntil = bt;
+    }
+
 
     on(again, 'click', function () { window.location.reload(); });
     on(againX, 'click', function () { window.location.reload(); });
@@ -1546,6 +1850,31 @@
       var p2 = prox * prox;
       var burst = (now < burstUntil) ? BURST_MUL : 1;
 
+      /* V2.10 -- is this cursor being aimed, or parked? A hand that is actually
+         playing sweeps hundreds of pixels; a camper sits in one small patch and
+         waits for the window to be delivered. Everything below that treats the
+         cursor as an obstacle is gated on this, so an active player's game is
+         completely unchanged -- the shield only exists for someone who stopped
+         playing. A 2-3 px wiggle never leaves the disc, so it stays camped. */
+      if (hasPointer) {
+        if (campAt <= -1e8) { campX = px; campY = py; campAt = now; }
+        var cmx = px - campX, cmy = py - campY;
+        if ((cmx * cmx + cmy * cmy) > CAMP_RADIUS * CAMP_RADIUS) {
+          campX = px; campY = py; campAt = now; cursorParked = false;
+        } else if (now - campAt > CAMP_MS) {
+          cursorParked = true;
+        }
+      } else {
+        cursorParked = false;
+      }
+
+      // the close button, which is the thing that must never be handed over
+      var bx = x + btnOffX, by = y + btnOffY;
+      var cbx = bx - px, cby = by - py;
+      var cbd = Math.sqrt(cbx * cbx + cby * cby);
+      var cux = (cbd > 1e-6) ? cbx / cbd : Math.cos(heading);
+      var cuy = (cbd > 1e-6) ? cby / cbd : Math.sin(heading);
+
       wanderT += dt;
       var turn = 1.15 * Math.sin(wanderT * 0.73 + ph1)
                + 0.72 * Math.sin(wanderT * 1.91 + ph2)
@@ -1599,8 +1928,49 @@
                               : (slideSign < 0 ? dLeft : dRight);
             if (room < SLIDE_MIN_ROOM) slideSign = -slideSign;
           }
-          var slide = SLIDE_ACCEL * prox * slideSign;
-          if (alongY) ay += slide; else ax += slide;
+
+          /* V2.10 -- the slide is what was delivering the X. Look along the
+             tangent before committing: if that side would carry the button
+             through a camped cursor's clearance, take the other one; if both
+             are blocked, leave the wall entirely and arc outward instead of
+             running the gauntlet. Against a moving cursor none of this arms. */
+          var laX = alongY ? 0 : SLIDE_LOOKAHEAD;
+          var laY = alongY ? SLIDE_LOOKAHEAD : 0;
+          var posBad = false, negBad = false;
+          if (cursorParked) {
+            var fpx = (bx + laX) - px, fpy = (by + laY) - py;
+            var fnx = (bx - laX) - px, fny = (by - laY) - py;
+            posBad = (fpx * fpx + fpy * fpy) < AVOID_SOFT * AVOID_SOFT;
+            negBad = (fnx * fnx + fny * fny) < AVOID_SOFT * AVOID_SOFT;
+            if (slideSign > 0 && posBad && !negBad) slideSign = -1;
+            else if (slideSign < 0 && negBad && !posBad) slideSign = 1;
+          }
+
+          if (posBad && negBad) {
+            // both ways are through the cursor: peel off the wall and go around
+            var outX = alongY ? ((dLeft <= dRight) ? 1 : -1) : 0;
+            var outY = alongY ? 0 : ((dTop <= dBot) ? 1 : -1);
+            ax += outX * SLIDE_ACCEL * prox;
+            ay += outY * SLIDE_ACCEL * prox;
+          } else {
+            var slide = SLIDE_ACCEL * prox * slideSign;
+            if (alongY) ay += slide; else ax += slide;
+          }
+        }
+      }
+
+      /* V2.10 -- the cursor as an obstacle. A camped cursor gets a clearance
+         disc the button steers around: a repulsion that grows as it closes, and
+         a brake on whatever momentum is carrying the button in. Both are
+         accelerations, so the motion stays continuous and nothing teleports. */
+      if (cursorParked && cbd < AVOID_SOFT) {
+        var av = (AVOID_SOFT - cbd) / AVOID_SOFT;
+        ax += cux * AVOID_ACCEL * av * av;
+        ay += cuy * AVOID_ACCEL * av * av;
+        var closing = -(vx * cux + vy * cuy);
+        if (closing > 0) {
+          ax += cux * closing * AVOID_BRAKE;
+          ay += cuy * closing * AVOID_BRAKE;
         }
       }
 
@@ -1687,6 +2057,15 @@
         var k = cap / sp;
         vx *= k;
         vy *= k;
+      }
+
+      /* V2.10 hard floor. After the cap, remove any velocity component still
+         closing on a camped cursor inside AVOID_HARD. This is a projection of
+         the velocity, not a move of the card: position stays continuous and the
+         wall clamp below is untouched, so containment is unaffected. */
+      if (cursorParked && cbd < AVOID_HARD) {
+        var closeV = -(vx * cux + vy * cuy);
+        if (closeV > 0) { vx += cux * closeV; vy += cuy * closeV; }
       }
 
       x += vx * dt;
@@ -1824,6 +2203,9 @@
       // Layer D samples between sub-step batches: the transform on screen is the
       // one this frame just drew, so it can be compared against the position the
       // engine integrated to.
+      if (CAPTCHA_ON && !capFired && started && t >= capAt) showCaptcha('timer');
+      capTick(t);
+
       if (geomDirty) { geomDirty = false; checkStructure(); attest(); }
       if (--attestIn <= 0) { attestIn = ATTEST_FRAMES; checkStructure(); attest(); }
 

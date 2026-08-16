@@ -16,7 +16,7 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "be7d7a1244b5ffe3e90322957a1c394ddd150a41b14acdafe8ccf8893e2b3991",
+  "js/chase.js": "d60fdeb00d6d508c68abf3b8ea2fee16d2692e05aa567adbebea6100b1c00c50",
   "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
   "js/main.js": "7a97a4c251eeec91557f67a4c0fa31e8f7e77cfcc09332ccc4b6247915c54a23"
 }
@@ -661,6 +661,67 @@
   }
 
   .shame.hide { display: none; }
+
+  /* ---- V2.12 captcha dialog ----
+     Simulation only. Sits above the playfield and takes every pointer event, so
+     the X behind it is unreachable while it is up. All of its art is drawn by
+     chase.js onto the two canvases; nothing here is an image. */
+  .capbox {
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 34, 34, 0.55);
+  }
+
+  .capbox.hide { display: none; }
+  .capbox .ovcard { width: min(320px, 100%); }
+
+  .captext {
+    margin: 0 0 12px;
+    font-family: var(--w95);
+    font-size: 13px;
+    line-height: 1.45;
+    color: #000;
+    text-align: left;
+  }
+
+  .capscene {
+    position: relative;
+    width: 260px;
+    height: 150px;
+    margin: 0 auto;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #0a1018;
+    touch-action: none;
+  }
+
+  .capshot { display: block; }
+
+  .cappiece {
+    position: absolute;
+    left: 6px;
+    top: 96px;
+    cursor: grab;
+    filter: drop-shadow(1px 1px 0 rgba(0, 0, 0, 0.6));
+    touch-action: none;
+  }
+
+  .cappiece:active { cursor: grabbing; }
+  .cappiece.solved { filter: none; }
+  .capbox.solved .capscene { border-color: #006b1f; }
+
+  .capnote {
+    margin: 12px 0 0;
+    font-family: var(--w95);
+    font-size: 11px;
+    color: #3d3d3d;
+    text-align: left;
+  }
 
   /* Ruling 3: shown when the viewport is too small for the card to flee in.
      Blocks the playfield outright -- while it is up the run is frozen, the clock
