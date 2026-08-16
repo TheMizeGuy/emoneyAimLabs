@@ -6,8 +6,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createContext, playRun, sendBeat, signClaim } = require('./helpers');
-const { newRunToken } = require('../validation');
+const {
+  createContext, playRun, sendBeat, signClaim, solveChallenge,
+} = require('./helpers');
+const { LIMITS, newRunToken } = require('../validation');
+const { CHALLENGE_ROUNDS, expectedAnswers } = require('../challenge');
 const chain = require('../chain');
 
 const FOREIGN_RUN_ID = newRunToken();
@@ -141,6 +144,19 @@ test('the CSRF wall refuses the content types an HTML form can send', async (t) 
   assert.ok(ctx.logs.some((entry) => entry.includes('content_type=3')));
 });
 
+test('the JSON body ceiling covers auth routes as well as API routes', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+
+  const response = await fetch(`${ctx.base}/auth/logout`, {
+    method: 'POST',
+    headers: { Origin: ctx.config.gameOrigin, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ padding: 'x'.repeat(5000) }),
+  });
+  assert.equal(response.status, 413);
+  assert.equal((await response.json()).error, 'payload_too_large');
+});
+
 test('unauthenticated calls are rejected, public reads are not', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -196,6 +212,24 @@ test('an honest practice run is accepted and ranked', async (t) => {
   assert.equal(await ctx.store.countRejections(), 0, 'an honest run leaves no audit trail');
 });
 
+test('a post-commit feed lookup failure cannot turn a stored score into a 500', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+
+  const played = await playRun(ctx, ctx.clientFor('1'), 'practice', 20000, {
+    beforeSubmit() {
+      // Install the fault after run/challenge events so it targets only the
+      // best-effort identity lookup that publishes the post-commit feed item.
+      ctx.store.getUser = async () => { throw new Error('feed identity unavailable'); };
+    },
+  });
+  assert.equal(played.submitted.status, 200);
+  assert.equal(played.submitted.json.rank, 1);
+  assert.equal((await ctx.store.getScore('1', 'practice')).timeMs, 20000);
+  assert.ok(ctx.logs.some((line) => line.includes('feed publish failed')));
+});
+
 test('an honest simulation run is accepted end to end', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -206,6 +240,38 @@ test('an honest simulation run is accepted end to end', async (t) => {
   assert.equal(submitted.status, 200);
   assert.equal(submitted.json.bestMs, 40000);
   assert.equal(submitted.json.mode, 'simulation');
+});
+
+test('flappy heartbeats cannot prepay simulation chase liveness', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+
+  const created = await client.post('/api/run', { mode: 'simulation' });
+  const runId = created.json.runId;
+  let token = created.json.chain;
+
+  // Pre-pump the full beat count while still in Flappy.
+  for (let i = 0; i < 11; i += 1) {
+    ctx.clock.advance(5000);
+    ({ chain: token } = await sendBeat(client, runId, token, false));
+  }
+
+  await solveChallenge(ctx, client, runId);
+
+  // Stamp Chase without crediting a too-close beat, then wait out a claimed
+  // minute and send just one fresh Chase beat.
+  ({ chain: token } = await sendBeat(client, runId, token, true));
+  ctx.clock.advance(60000);
+  ({ chain: token } = await sendBeat(client, runId, token, true));
+
+  const claim = { runId, timeMs: 60000, misses: 3, nearMisses: 4, sus: 0 };
+  claim.sig = signClaim(claim);
+  const submitted = await client.post('/api/score', claim);
+
+  assert.equal(submitted.status, 400);
+  assert.equal(submitted.json.error, 'insufficient_liveness');
 });
 
 test('a run token cannot be replayed', async (t) => {
@@ -232,6 +298,7 @@ test('a run belonging to another player cannot be scored or beaten', async (t) =
   const owner = ctx.clientFor('1');
   const created = await owner.post('/api/run', { mode: 'practice' });
   const runId = created.json.runId;
+  await solveChallenge(ctx, owner, runId);
   let token = created.json.chain;
   for (let i = 0; i < 4; i += 1) {
     ctx.clock.advance(5000);
@@ -289,6 +356,33 @@ test('a time longer than the chase the server timed is rejected', async (t) => {
   assert.equal(await ctx.store.countRejections('time_exceeds_elapsed'), 1);
 });
 
+test('waiting out a live run cannot buy a shorter claimed score', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'forger');
+  const client = ctx.clientFor('1');
+  const stream = ctx.collectFeed();
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  await solveChallenge(ctx, client, runId);
+
+  let token = created.json.chain;
+  for (let i = 0; i < 4; i += 1) {
+    ctx.clock.advance(5000);
+    ({ chain: token } = await sendBeat(client, runId, token, true));
+  }
+  const claim = { runId, timeMs: 8000, misses: 0, nearMisses: 3, sus: 0 };
+  claim.sig = signClaim(claim);
+  const response = await client.post('/api/score', claim);
+  assert.equal(response.status, 400);
+  assert.equal(response.json.error, 'time_below_elapsed');
+  assert.equal((await client.get('/api/leaderboard?mode=practice')).json.entries.length, 0);
+  assert.equal((await ctx.store.getRun(runId)).failed, true,
+    'a caught clock forgery cannot retry the same run with a corrected number');
+  assert.equal(stream.of('cheat_detected').length, 1);
+  assert.equal(stream.of('cheat_detected')[0].data.reason, 'server clock manipulation');
+});
+
 // The forgery that used to land rank 1 on both boards in seconds: claim the
 // mode floor, which is the best score anyone can hold, and note that the old
 // claim-driven rule demanded zero beats for exactly that claim.
@@ -299,6 +393,7 @@ test('the floor forgery no longer lands: a practice claim with no beats is refus
   const client = ctx.clientFor('1');
 
   const created = await client.post('/api/run', { mode: 'practice' });
+  await solveChallenge(ctx, client, created.json.runId);
   // Wait out the elapsed check and nothing else. No beats at all.
   ctx.clock.advance(8100);
   const claim = { runId: created.json.runId, timeMs: 8000, misses: 0, nearMisses: 3, sus: 0 };
@@ -343,6 +438,7 @@ test('beats clustered at the start of the window do not buy a score', async (t) 
 
   const created = await client.post('/api/run', { mode: 'practice' });
   const runId = created.json.runId;
+  await solveChallenge(ctx, client, runId);
   let token = created.json.chain;
 
   // Beat honestly for the first 25 seconds, then go silent for the rest.
@@ -367,6 +463,7 @@ test('a run that stops beating mid-way cannot be scored', async (t) => {
 
   const created = await client.post('/api/run', { mode: 'practice' });
   const runId = created.json.runId;
+  await solveChallenge(ctx, client, runId);
   let token = created.json.chain;
 
   ({ chain: token } = await sendBeat(client, runId, token, true));
@@ -409,6 +506,25 @@ test('legitimate runs at and around the floors are accepted', async (t) => {
   assert.equal(await ctx.store.countRejections(), 0, 'honest play leaves no audit trail');
 });
 
+test('a clean sub-two-second Chase is not rejected by an invented heartbeat floor', async (t) => {
+  const ctx = await createContext({
+    env: { FLOOR_PRACTICE_MS: '700', FLOOR_SIM_MS: '700' },
+  });
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'honest');
+  const client = ctx.clientFor('1');
+
+  // A real browser run in this repository completed cleanly at 1.839 s. It can
+  // only carry the immediate Chase beat before it wins.
+  const practice = await playRun(ctx, client, 'practice', 1839);
+  assert.equal(practice.submitted.status, 200, JSON.stringify(practice.submitted.json));
+
+  // Simulation has ample Flappy liveness, then the phase-stamp beat is the first
+  // Chase witness even when it arrives soon after the last Flappy beat.
+  const simulation = await playRun(ctx, client, 'simulation', 1839, { flappyMs: 15922 });
+  assert.equal(simulation.submitted.status, 200, JSON.stringify(simulation.submitted.json));
+});
+
 test('a long claim without heartbeats is rejected for liveness', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -416,6 +532,7 @@ test('a long claim without heartbeats is rejected for liveness', async (t) => {
   const client = ctx.clientFor('1');
 
   const created = await client.post('/api/run', { mode: 'practice' });
+  await solveChallenge(ctx, client, created.json.runId);
   ctx.clock.advance(300000);
   const claim = { runId: created.json.runId, timeMs: 300000, misses: 3, nearMisses: 4, sus: 0 };
   claim.sig = signClaim(claim);
@@ -432,6 +549,7 @@ test('heartbeat stuffing credits nothing', async (t) => {
 
   const created = await client.post('/api/run', { mode: 'practice' });
   const runId = created.json.runId;
+  await solveChallenge(ctx, client, runId);
   let token = created.json.chain;
 
   // Twenty beats inside the same millisecond, each echoing the token it was
@@ -602,22 +720,22 @@ test('a simulation time past the shot clock is rejected, practice is not', async
   assert.equal(practice.submitted.status, 200, 'practice has no shot clock');
 });
 
-test('a win claiming no near misses is refused as implausible', async (t) => {
+test('cosmetic near-miss counts do not override server-witnessed proof', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
   await ctx.seedUser('1', 'player');
   const client = ctx.clientFor('1');
 
-  // The screenshot forgery this rule exists for: zero clicks, zero misses.
+  // A trusted browser win can cross the near ring only once, and a hand-built
+  // request can claim any count. The counter is bounded but never authoritative.
   const zero = await playRun(ctx, client, 'practice', 20000, { misses: 0, nearMisses: 0 });
-  assert.equal(zero.submitted.status, 422);
-  assert.equal(zero.submitted.json.error, 'implausible_stats');
+  assert.equal(zero.submitted.status, 200);
 
   const two = await playRun(ctx, client, 'practice', 20000, { nearMisses: 2 });
-  assert.equal(two.submitted.status, 422);
+  assert.equal(two.submitted.status, 200);
 
   const three = await playRun(ctx, client, 'practice', 20000, { misses: 0, nearMisses: 3 });
-  assert.equal(three.submitted.status, 200, 'a clean but plausible run still counts');
+  assert.equal(three.submitted.status, 200);
 });
 
 test('any sus event at all blocks a submission', async (t) => {
@@ -953,6 +1071,49 @@ test('run creation closes the previous run and streams the failure', async (t) =
   assert.equal(stream.of('run_started').length, 0);
 });
 
+test('concurrent run creation leaves one open run without surfacing a server error', async (t) => {
+  let entered = 0;
+  let release;
+  const bothEntered = new Promise((resolve) => { release = resolve; });
+  async function gate() {
+    entered += 1;
+    if (entered === 2) release();
+    await bothEntered;
+  }
+
+  const ctx = await createContext({
+    decorateStore(base) {
+      return {
+        ...base,
+        async createRun(...args) {
+          await gate();
+          return base.createRun(...args);
+        },
+        async replaceOpenRun(...args) {
+          await gate();
+          return base.replaceOpenRun(...args);
+        },
+      };
+    },
+  });
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+
+  const responses = await Promise.all([
+    client.post('/api/run', { mode: 'practice' }),
+    client.post('/api/run', { mode: 'simulation' }),
+  ]);
+  assert.deepEqual(responses.map((response) => response.status), [200, 200]);
+
+  const { rows } = await ctx.pool.query(
+    'SELECT id FROM runs WHERE user_id = $1 AND consumed = false AND failed = false',
+    ['1'],
+  );
+  assert.equal(rows.length, 1);
+  assert.ok(responses.some((response) => response.json.runId === rows[0].id));
+});
+
 test('an abandoned run is swept into a failure and streamed with its phase', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1024,6 +1185,281 @@ test('a flappy death streams live', async (t) => {
   });
 });
 
+test('the visual challenge is server-owned, opaque and idempotent', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+
+  const first = await client.post('/api/event', { type: 'challenge_start', runId });
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(Object.keys(first.json).sort(), ['rounds', 'version']);
+  assert.equal(first.json.version, 1);
+  assert.equal(first.json.rounds.length, CHALLENGE_ROUNDS);
+  for (const round of first.json.rounds) {
+    assert.match(round.scene, /^data:image\/png;base64,/);
+    assert.match(round.piece, /^data:image\/png;base64,/);
+    assert.equal(round.holes.length, 4);
+    assert.equal(Number.isFinite(round.start.x), true);
+    assert.equal(Number.isFinite(round.start.y), true);
+  }
+  const publicJson = JSON.stringify(first.json);
+  assert.equal(/seed|answer|targetHole/i.test(publicJson), false, 'solution material stays server-side');
+
+  const duplicate = await client.post('/api/event', { type: 'challenge_start', runId });
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(duplicate.json, first.json, 'a retry receives the same immutable puzzle');
+  const stored = await ctx.store.getRun(runId);
+  assert.equal(stored.challengeCount, 1);
+  assert.match(stored.challengeSeed, /^[A-Za-z0-9_-]{43}$/);
+});
+
+test('concurrent challenge starts and correct solves are idempotent', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+
+  const [startA, startB] = await Promise.all([
+    client.post('/api/event', { type: 'challenge_start', runId }),
+    client.post('/api/event', { type: 'challenge_start', runId }),
+  ]);
+  assert.deepEqual([startA.status, startB.status], [200, 200]);
+  assert.deepEqual(startA.json, startB.json);
+
+  const run = await ctx.store.getRun(runId);
+  const answers = expectedAnswers({
+    runId, seed: run.challengeSeed, secret: ctx.config.sessionSecret,
+  });
+  ctx.clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS);
+  const [solveA, solveB] = await Promise.all([
+    client.post('/api/event', { type: 'challenge_solve', runId, answers }),
+    client.post('/api/event', { type: 'challenge_solve', runId, answers }),
+  ]);
+  assert.deepEqual([solveA.status, solveB.status], [200, 200]);
+  assert.equal((await ctx.store.getRun(runId)).challengeSolvedCount, 1);
+});
+
+test('wait-only and wrong-answer challenge bypasses cannot qualify a run', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const stream = ctx.collectFeed();
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+  assert.equal((await client.post('/api/event', {
+    type: 'challenge_start', runId,
+  })).status, 200);
+  ctx.clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS);
+
+  const noAnswers = await client.post('/api/event', { type: 'challenge_solve', runId });
+  assert.equal(noAnswers.status, 400);
+  assert.equal(noAnswers.json.error, 'invalid_challenge_answer');
+  assert.equal((await ctx.store.getRun(runId)).challengeSolvedCount, 0);
+
+  const run = await ctx.store.getRun(runId);
+  const correct = expectedAnswers({
+    runId, seed: run.challengeSeed, secret: ctx.config.sessionSecret,
+  });
+  const wrong = correct.map((answer) => (answer + 1) % 4);
+  const refused = await client.post('/api/event', {
+    type: 'challenge_solve', runId, answers: wrong,
+  });
+  assert.equal(refused.status, 422);
+  assert.equal(refused.json.error, 'challenge_incorrect');
+  assert.equal((await ctx.store.getRun(runId)).failed, true, 'the one attempt is consumed');
+  assert.equal(stream.of('run_failed').length, 1);
+  assert.equal(stream.of('run_failed')[0].data.reason, 'captcha-fail');
+  assert.equal(stream.of('cheat_detected').length, 0, 'a human misdrop is not publicly shamed');
+});
+
+test('repeated wrong matches use brief graduated retry delays instead of banning the player', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+
+  async function submitWrongMatch() {
+    const created = await client.post('/api/run', { mode: 'practice' });
+    assert.equal(created.status, 200);
+    ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+    assert.equal((await client.post('/api/event', {
+      type: 'challenge_start', runId: created.json.runId,
+    })).status, 200);
+    const run = await ctx.store.getRun(created.json.runId);
+    const correct = expectedAnswers({
+      runId: run.id, seed: run.challengeSeed, secret: ctx.config.sessionSecret,
+    });
+    ctx.clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS);
+    const response = await client.post('/api/event', {
+      type: 'challenge_solve',
+      runId: run.id,
+      answers: correct.map((answer) => (answer + 1) % 4),
+    });
+    assert.equal(response.status, 422);
+  }
+
+  await submitWrongMatch();
+  await submitWrongMatch();
+
+  const delayedRun = await client.post('/api/run', { mode: 'practice' });
+  assert.equal(delayedRun.status, 200, 'the player is not account-banned');
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+  const delayed = await client.post('/api/event', {
+    type: 'challenge_start', runId: delayedRun.json.runId,
+  });
+  assert.equal(delayed.status, 429);
+  assert.equal(delayed.json.error, 'challenge_retry_later');
+  assert.equal(delayed.headers.get('retry-after'), '5');
+  assert.equal(delayed.json.retryAfterSeconds, 5);
+
+  ctx.clock.advance(5000);
+  const allowed = await client.post('/api/run', { mode: 'practice' });
+  assert.equal(allowed.status, 200);
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+  assert.equal((await client.post('/api/event', {
+    type: 'challenge_start', runId: allowed.json.runId,
+  })).status, 200, 'the account is immediately usable after the short delay');
+});
+
+test('challenge starts outside their server-witnessed phase are refused', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+
+  const practice = await client.post('/api/run', { mode: 'practice' });
+  const practiceEarly = await client.post('/api/event', {
+    type: 'challenge_start', runId: practice.json.runId,
+  });
+  assert.equal(practiceEarly.status, 409);
+  assert.equal(practiceEarly.json.error, 'challenge_wrong_phase');
+  assert.equal((await ctx.store.getRun(practice.json.runId)).challengeSeed, null);
+
+  const simulation = await client.post('/api/run', { mode: 'simulation' });
+  const simulationEarly = await client.post('/api/event', {
+    type: 'challenge_start', runId: simulation.json.runId,
+  });
+  assert.equal(simulationEarly.status, 409);
+  assert.equal(simulationEarly.json.error, 'challenge_wrong_phase');
+  assert.equal((await ctx.store.getRun(simulation.json.runId)).challengeSeed, null);
+
+  ctx.clock.advance(LIMITS.MIN_FLAPPY_PHASE_MS);
+  assert.equal((await client.post('/api/event', {
+    type: 'challenge_start', runId: simulation.json.runId,
+  })).status, 200);
+});
+
+test('an impossibly fast visual solve is refused and shown in the activity feed', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const stream = ctx.collectFeed();
+  const created = await client.post('/api/run', { mode: 'practice' });
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+
+  const withoutStart = await client.post('/api/event', {
+    type: 'challenge_solve', runId: created.json.runId,
+    answers: Array(CHALLENGE_ROUNDS).fill(0),
+  });
+  assert.equal(withoutStart.status, 400);
+  assert.equal(withoutStart.json.error, 'challenge_not_started');
+
+  assert.equal((await client.post('/api/event', {
+    type: 'challenge_start', runId: created.json.runId,
+  })).status, 200);
+  const tooFast = await client.post('/api/event', {
+    type: 'challenge_solve', runId: created.json.runId,
+    answers: Array(CHALLENGE_ROUNDS).fill(0),
+  });
+  assert.equal(tooFast.status, 422);
+  assert.equal(tooFast.json.error, 'challenge_too_fast');
+  const closed = await ctx.store.getRun(created.json.runId);
+  assert.equal(closed.challengeSolvedCount, 0);
+  assert.equal(closed.failed, true, 'a detected protocol bot cannot wait and retry the same run');
+  const caughtAtMs = ctx.clock.nowMs();
+
+  ctx.clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS);
+  const retry = await client.post('/api/event', {
+    type: 'challenge_solve', runId: created.json.runId,
+    answers: Array(CHALLENGE_ROUNDS).fill(0),
+  });
+  assert.equal(retry.status, 409);
+  assert.equal(retry.json.error, 'run_closed');
+
+  const caught = stream.of('cheat_detected');
+  assert.equal(caught.length, 1);
+  const { at: caughtAt, ...caughtData } = caught[0].data;
+  assert.equal(caughtAt, caughtAtMs);
+  assert.deepEqual(caughtData, {
+    twitchId: '1',
+    name: 'PLAYER',
+    avatar: 'https://cdn.test/player.png',
+    reason: 'automated visual verification',
+  });
+});
+
+test('a completed visual challenge cannot be replayed into another cycle', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const created = await client.post('/api/run', { mode: 'practice' });
+  await solveChallenge(ctx, client, created.json.runId);
+
+  assert.equal((await client.post('/api/event', {
+    type: 'challenge_start', runId: created.json.runId,
+  })).status, 200, 'a delayed duplicate remains harmless and idempotent');
+
+  const run = await ctx.store.getRun(created.json.runId);
+  assert.equal(run.challengeCount, 1);
+  assert.equal(run.challengeSolvedCount, 1);
+});
+
+test('visual challenge ownership, expiry and one-attempt state fail closed', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'owner');
+  await ctx.seedUser('2', 'thief');
+  const owner = ctx.clientFor('1');
+  const thief = ctx.clientFor('2');
+  const created = await owner.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+
+  assert.equal((await thief.post('/api/event', {
+    type: 'challenge_start', runId,
+  })).status, 404, 'another account cannot start or reset the timer');
+  assert.equal((await owner.post('/api/event', {
+    type: 'challenge_start', runId,
+  })).status, 200);
+
+  ctx.clock.advance(LIMITS.MAX_CHALLENGE_SOLVE_MS + 1);
+  const expired = await owner.post('/api/event', {
+    type: 'challenge_solve', runId, answers: Array(CHALLENGE_ROUNDS).fill(0),
+  });
+  assert.equal(expired.status, 422);
+  assert.equal(expired.json.error, 'challenge_expired');
+
+  assert.equal((await owner.post('/api/event', {
+    type: 'challenge_start', runId,
+  })).status, 200, 'a duplicate request stays idempotent');
+  const run = await ctx.store.getRun(runId);
+  assert.equal(run.challengeCount, 1);
+  assert.equal(run.challengeSolvedCount, 0);
+  assert.equal(run.challengeSolvedAtMs, null);
+});
+
 test('a ban event colours the run, closes it and streams immediately', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1036,7 +1472,9 @@ test('a ban event colours the run, closes it and streams immediately', async (t)
   ctx.clock.advance(20000);
   ({ chain: token } = await sendBeat(client, created.json.runId, token, true));
 
-  const banned = await client.post('/api/event', { type: 'ban', reason: 'captcha-timeout' });
+  const banned = await client.post('/api/event', {
+    type: 'ban', reason: 'captcha-timeout', runId: created.json.runId,
+  });
   assert.equal(banned.status, 204);
 
   const failed = stream.of('run_failed');
@@ -1055,6 +1493,30 @@ test('a ban event colours the run, closes it and streams immediately', async (t)
   assert.equal((await client.post('/api/score', claim)).status, 409);
 });
 
+test('a delayed ban event cannot close a replacement run', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const stream = ctx.collectFeed();
+
+  const oldRun = await client.post('/api/run', { mode: 'simulation' });
+  const replacement = await client.post('/api/run', { mode: 'practice' });
+  assert.equal(stream.of('run_failed').length, 1, 'replacement closes only the old run');
+
+  const late = await client.post('/api/event', {
+    type: 'ban', reason: 'timeout', runId: oldRun.json.runId,
+  });
+  assert.equal(late.status, 204);
+
+  const oldRecord = await ctx.pool.query('SELECT fail_reason FROM runs WHERE id = $1', [oldRun.json.runId]);
+  const liveRow = await ctx.store.getRun(replacement.json.runId);
+  assert.equal(oldRecord.rows[0].fail_reason, 'timeout', 'the event may colour only its own closed run');
+  assert.equal(liveRow.failed, false, 'a stale event must not select the newest run');
+  assert.equal(stream.of('run_failed').length, 1, 'the late event does not create a second failure');
+  assert.equal((await client.get('/api/me')).json.chaseFails, 0);
+});
+
 test('a spoofed ban reason is refused and a spammed one cannot touch the leaderboard', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1065,16 +1527,19 @@ test('a spoofed ban reason is refused and a spammed one cannot touch the leaderb
     { type: 'ban' },
     { type: 'ban', reason: 'because-i-said-so' },
     { type: 'ban', reason: 1 },
+    { type: 'ban', reason: 'timeout' },
   ]) {
     const response = await client.post('/api/event', body);
     assert.equal(response.status, 400, JSON.stringify(body));
-    assert.equal(response.json.error, 'invalid_ban_reason');
+    assert.ok(['invalid_ban_reason', 'invalid_run_id'].includes(response.json.error));
   }
 
   // A legitimate win, then a pile of ban claims: the record does not move.
   await playRun(ctx, client, 'practice', 20000);
   for (let i = 0; i < 5; i += 1) {
-    await client.post('/api/event', { type: 'ban', reason: 'timeout' });
+    await client.post('/api/event', {
+      type: 'ban', reason: 'timeout', runId: newRunToken(),
+    });
   }
   const board = await client.get('/api/leaderboard?mode=practice');
   assert.equal(board.json.entries.length, 1);
@@ -1102,8 +1567,10 @@ test('the player card is public and shows history, bests and totals', async (t) 
 
   await playRun(ctx, client, 'practice', 20000, { misses: 4, nearMisses: 5 });
   ctx.clock.advance(1000);
-  await client.post('/api/run', { mode: 'simulation' });
-  await client.post('/api/event', { type: 'ban', reason: 'captcha-fail' });
+  const simulation = await client.post('/api/run', { mode: 'simulation' });
+  await client.post('/api/event', {
+    type: 'ban', reason: 'captcha-fail', runId: simulation.json.runId,
+  });
   await client.post('/api/event', { type: 'flappy_death' });
 
   const card = await ctx.makeClient().get('/api/player/7');
@@ -1351,7 +1818,7 @@ test('a complete login round trip sets a session and discards the token', async 
     twitch: {
       exchangeCode: async (code) => { seen.codes.push(code); return 'secret-user-token'; },
       fetchIdentity: async () => identity,
-      revoke: async (token) => { seen.revoked.push(token); },
+      revoke: async (token) => { seen.revoked.push(token); return false; },
     },
   });
   t.after(() => ctx.close());
@@ -1372,6 +1839,10 @@ test('a complete login round trip sets a session and discards the token', async 
   assert.match(returned.hash, /^#session=./);
   assert.deepEqual(seen.codes, ['live-code']);
   assert.deepEqual(seen.revoked, ['secret-user-token'], 'the user token is handed straight back');
+  assert.ok(
+    ctx.logs.some((line) => line.includes('auth token revoke failed')),
+    'provider refusal is visible without leaking the token',
+  );
 
   const cookies = callback.headers.getSetCookie();
   const session = cookies.find((c) => c.startsWith('eal_session='));
@@ -1521,6 +1992,29 @@ test('logout revokes the cookie itself, not just the browser copy', async (t) =>
   assert.equal((await fresh.get('/api/me')).status, 200);
 });
 
+test('logout does not claim revocation when the epoch write fails', async (t) => {
+  const ctx = await createContext({
+    decorateStore(base) {
+      return {
+        ...base,
+        async bumpSessionEpoch() {
+          const err = new Error('database unavailable');
+          err.code = '57P01';
+          throw err;
+        },
+      };
+    },
+  });
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+
+  const response = await ctx.clientFor('1').post('/auth/logout', {});
+  assert.equal(response.status, 503);
+  assert.equal(response.json.error, 'logout_unavailable');
+  assert.match(response.headers.get('set-cookie'), /Max-Age=0/);
+  assert.equal(await ctx.store.getSessionEpoch('1'), 0);
+});
+
 test('logout is safe to call without a session and twice over', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1596,6 +2090,26 @@ test('a global per-address ceiling sheds a flood before any work happens', async
   assert.equal(await ctx.store.countRejections(), 0);
 });
 
+test('Railway client identity ignores caller-controlled forwarding chains', async (t) => {
+  const ctx = await createContext({ globalIpLimit: 1 });
+  t.after(() => ctx.close());
+  const client = ctx.makeClient();
+
+  const first = await client.get('/api/leaderboard?mode=practice', {
+    headers: { 'X-Real-IP': '198.51.100.10', 'X-Forwarded-For': '203.0.113.1' },
+  });
+  const rotatedSpoof = await client.get('/api/leaderboard?mode=practice', {
+    headers: { 'X-Real-IP': '198.51.100.10', 'X-Forwarded-For': '203.0.113.2' },
+  });
+  const otherClient = await client.get('/api/leaderboard?mode=practice', {
+    headers: { 'X-Real-IP': '198.51.100.11', 'X-Forwarded-For': '203.0.113.1' },
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(rotatedSpoof.status, 429, 'rotating X-Forwarded-For cannot mint a new bucket');
+  assert.equal(otherClient.status, 200, 'a different Railway client address gets its own bucket');
+});
+
 test('the audit trail keeps verdicts and discards flood noise', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1621,6 +2135,23 @@ test('the audit trail keeps verdicts and discards flood noise', async (t) => {
   }
 });
 
+test('score-only rejection traffic cannot avoid the retention prune', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  await ctx.store.recordRejection({
+    userId: '1', ipHash: null, endpoint: 'POST /api/score', reason: 'old_marker', payload: {},
+  }, ctx.clock.now());
+  ctx.clock.advance(8 * 24 * 60 * 60 * 1000);
+
+  const rejected = await ctx.clientFor('1').post('/api/score', {
+    ...forgery(), sig: '0'.repeat(16),
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.json.error, 'invalid_signature');
+  assert.equal(await ctx.store.countRejections('old_marker'), 0);
+});
+
 test('there is no endpoint that reads or writes the audit trail', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1644,6 +2175,7 @@ test('two concurrent submissions of one run produce a single score', async (t) =
 
   const created = await client.post('/api/run', { mode: 'practice' });
   const runId = created.json.runId;
+  await solveChallenge(ctx, client, runId);
   let token = created.json.chain;
   for (let i = 0; i < 4; i += 1) {
     ctx.clock.advance(5000);

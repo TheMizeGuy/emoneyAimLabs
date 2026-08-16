@@ -6,7 +6,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createStore, LEADERBOARD_LIMIT, RUN_HISTORY_LIMIT } = require('../store');
+const {
+  createStore,
+  LEADERBOARD_LIMIT,
+  RUN_HISTORY_LIMIT,
+  CHALLENGE_RETRY_DELAYS_MS,
+  CHALLENGE_RETRY_RESET_MS,
+} = require('../store');
 const { createMemPool, createClock } = require('./helpers');
 const { LIMITS } = require('../validation');
 
@@ -36,6 +42,72 @@ async function liveRun(store, clock, userId, mode = 'practice') {
   const runId = await store.createRun(userId, mode, clock.now());
   if (mode !== 'practice') await store.stampChaseStart(runId, clock.now());
   return runId;
+}
+
+// pg-mem deliberately is not used for failure-atomicity assertions because its
+// adapter does not implement ROLLBACK. This fake models only the transaction
+// boundary; ordinary store tests execute the exact SQL against pg-mem.
+function closureAtomicityFixture() {
+  let failCounter = false;
+  const state = { failed: false, reason: null, totalFails: 0 };
+  let snapshot = null;
+  async function query(sqlValue) {
+    const sql = String(sqlValue);
+    if (sql === 'BEGIN') {
+      snapshot = { ...state };
+      return { rows: [] };
+    }
+    if (sql === 'ROLLBACK') {
+      Object.assign(state, snapshot);
+      snapshot = null;
+      return { rows: [] };
+    }
+    if (sql === 'COMMIT') {
+      snapshot = null;
+      return { rows: [] };
+    }
+    if (/SELECT twitch_id, challenge_fail_count, challenge_fail_last_at/.test(sql)) {
+      return {
+        rows: [{
+          twitch_id: '1', challenge_fail_count: 0, challenge_fail_last_at: null,
+        }],
+      };
+    }
+    if (/UPDATE runs SET failed = true/.test(sql)) {
+      if (state.failed) return { rows: [] };
+      state.failed = true;
+      state.reason = /fail_reason/.test(sql) ? 'timeout' : null;
+      return {
+        rows: [{
+          id: 'run-1', user_id: '1', mode: 'practice',
+          fail_reason: state.reason, chase_started_at: new Date(),
+        }],
+      };
+    }
+    if (failCounter && /UPDATE users\s+SET runs_failed_total/.test(sql)) {
+      throw new Error('counter write unavailable');
+    }
+    if (/UPDATE users\s+SET runs_failed_total/.test(sql)) {
+      state.totalFails += 1;
+      return { rows: [] };
+    }
+    if (/UPDATE runs SET fail_reason/.test(sql)) {
+      state.reason = 'timeout';
+      return { rows: [] };
+    }
+    throw new Error(`unexpected SQL in transactional fake: ${sql}`);
+  }
+  const pool = {
+    query,
+    async connect() {
+      return { query, release() {} };
+    },
+  };
+  return {
+    store: createStore(pool),
+    state,
+    failCounters(value) { failCounter = value; },
+  };
 }
 
 test('migration is idempotent', async () => {
@@ -96,7 +168,7 @@ test('run tokens are unguessable and unique', async () => {
   await seed(store, clock, '1');
   const seen = new Set();
   for (let i = 0; i < 50; i += 1) {
-    const runId = await store.createRun('1', 'practice', clock.advance(1000));
+    const { runId } = await store.replaceOpenRun('1', 'practice', clock.advance(1000));
     // 24 random bytes, base64url encoded: 192 bits of entropy.
     assert.equal(runId.length, 32);
     assert.match(runId, /^[A-Za-z0-9_-]{32}$/);
@@ -106,26 +178,111 @@ test('run tokens are unguessable and unique', async () => {
   await pool.end();
 });
 
+test('the database permits at most one open run per user', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+  await store.createRun('1', 'practice', clock.now());
+
+  await assert.rejects(
+    store.createRun('1', 'simulation', clock.now()),
+    /unique|duplicate|runs_one_open_per_user/i,
+  );
+
+  const { rows } = await pool.query(
+    'SELECT COUNT(*) AS n FROM runs WHERE user_id = $1 AND consumed = false AND failed = false',
+    ['1'],
+  );
+  assert.equal(Number(rows[0].n), 1);
+  await pool.end();
+});
+
+test('replacing a run closes the previous one and creates one open successor', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+  const first = await store.createRun('1', 'simulation', clock.now());
+
+  const replaced = await store.replaceOpenRun('1', 'practice', clock.advance(1000));
+  assert.equal(replaced.failures.length, 1);
+  assert.equal(replaced.failures[0].runId, first);
+  assert.equal(replaced.failures[0].phase, 'flappy');
+  assert.notEqual(replaced.runId, first);
+
+  const { rows } = await pool.query(
+    'SELECT id FROM runs WHERE user_id = $1 AND consumed = false AND failed = false',
+    ['1'],
+  );
+  assert.deepEqual(rows.map((row) => row.id), [replaced.runId]);
+  assert.equal((await store.getUser('1')).totalFails, 1);
+  await pool.end();
+});
+
 test('practice runs stamp the chase immediately, simulation runs do not', async () => {
   const { pool, store, clock } = await fixture();
   await seed(store, clock, '1');
+  await seed(store, clock, '2');
 
   const practice = await store.getRun(await store.createRun('1', 'practice', clock.now()));
   assert.equal(practice.chaseStartedAtMs, practice.issuedAtMs);
+  assert.equal(practice.chaseStartBeats, 0);
   assert.equal(practice.outcome, undefined, 'outcome is not part of the run view used in scoring');
 
-  const sim = await store.getRun(await store.createRun('1', 'simulation', clock.now()));
+  const simId = await store.createRun('2', 'simulation', clock.now());
+  const sim = await store.getRun(simId);
   assert.equal(sim.chaseStartedAtMs, null);
 
-  clock.advance(20000);
+  await store.countBeat(simId, clock.advance(5000), { ...BEAT_OPTS, expectedCounter: 0 });
+  await store.countBeat(simId, clock.advance(5000), {
+    ...BEAT_OPTS, expectedCounter: 1, gapMs: 5000,
+  });
+  clock.advance(10000);
   assert.equal(await store.stampChaseStart(sim.id, clock.now()), true);
   const stamped = await store.getRun(sim.id);
   assert.equal(stamped.chaseStartedAtMs, clock.nowMs());
+  assert.equal(stamped.chaseStartBeats, 2);
 
   // The stamp is monotonic: a second attempt cannot move it.
   clock.advance(20000);
   assert.equal(await store.stampChaseStart(sim.id, clock.now()), false);
   assert.equal((await store.getRun(sim.id)).chaseStartedAtMs, stamped.chaseStartedAtMs);
+  await pool.end();
+});
+
+test('the one visual challenge is server-timed, owned and monotonic', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+  await seed(store, clock, '2');
+  const runId = await store.createRun('1', 'practice', clock.now());
+
+  const initial = await store.getRun(runId);
+  assert.equal(initial.challengeCount, 0);
+  assert.equal(initial.challengeSolvedCount, 0);
+  assert.equal(initial.challengeStartedAtMs, null);
+  assert.equal(initial.challengeSolvedAtMs, null);
+
+  const challengeSeed = 'a'.repeat(43);
+  assert.equal(await store.startChallenge(runId, '1', challengeSeed, clock.now()), true);
+  assert.equal(await store.startChallenge(runId, '1', 'b'.repeat(43), clock.advance(100)), false,
+    'a duplicate start cannot reset the server timer');
+  assert.equal(await store.startChallenge(runId, '2', 'c'.repeat(43), clock.now()), false,
+    'another player cannot open a challenge on this run');
+  assert.equal(await store.solveChallenge(runId, '1', 2, clock.now()), false,
+    'a solve for a different cycle cannot land');
+
+  assert.equal(await store.solveChallenge(
+    runId, '1', 1, clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS),
+  ), true);
+  let run = await store.getRun(runId);
+  assert.equal(run.challengeCount, 1);
+  assert.equal(run.challengeSolvedCount, 1);
+  assert.equal(run.challengeSeed, challengeSeed, 'the committed server seed cannot be replaced');
+  assert.ok(run.challengeSolvedAtMs > run.challengeStartedAtMs);
+
+  assert.equal(await store.startChallenge(runId, '1', 'd'.repeat(43), clock.advance(100)), false,
+    'a completed one-time challenge cannot be reopened');
+  run = await store.getRun(runId);
+  assert.equal(run.challengeCount, 1);
+  assert.equal(run.challengeSolvedCount, 1);
+  assert.ok(run.challengeSolvedAtMs > run.challengeStartedAtMs);
   await pool.end();
 });
 
@@ -270,21 +427,23 @@ test('flappy death events move neither run counter', async () => {
 
 test('stale runs are swept per owner and only once', async () => {
   const { pool, store, clock } = await fixture();
-  for (const id of ['1', '2']) await seed(store, clock, id);
+  for (const id of ['1', '2', '3']) await seed(store, clock, id);
 
   await store.createRun('1', 'practice', clock.now());
-  await store.createRun('1', 'simulation', clock.now());
-  const live = await store.createRun('2', 'practice', clock.now());
+  await store.createRun('2', 'simulation', clock.now());
+  const live = await store.createRun('3', 'practice', clock.now());
 
   clock.advance(60000);
   await store.countBeat(live, clock.now(), BEAT_OPTS);
 
   clock.advance(60000);
   const swept = await store.failStaleRuns(clock.now());
-  assert.equal(swept.length, 2, 'both of user 1 runs went stale');
-  assert.equal((await store.getUser('1')).totalFails, 2);
+  assert.equal(swept.length, 2, 'both stale owners were closed');
+  assert.equal((await store.getUser('1')).totalFails, 1);
   assert.equal((await store.getUser('1')).chaseFails, 1, 'only the practice run reached the chase');
-  assert.equal((await store.getUser('2')).totalFails, 0);
+  assert.equal((await store.getUser('2')).totalFails, 1);
+  assert.equal((await store.getUser('2')).chaseFails, 0);
+  assert.equal((await store.getUser('3')).totalFails, 0);
 
   assert.equal((await store.failStaleRuns(clock.now())).length, 0, 'the sweep is idempotent');
 
@@ -304,6 +463,7 @@ test('a scored run is never counted as a failure', async () => {
     clock.now(),
   );
   assert.equal(written.ok, true);
+  assert.equal(written.rank, 1);
 
   assert.equal((await store.failOpenRunsForUser('1')).length, 0);
   clock.advance(10 * 60 * 1000);
@@ -388,6 +548,27 @@ test('the database refuses an impossible score even if the app ever let one thro
 
   await assert.rejects(
     () => pool.query(
+      `INSERT INTO score_submissions
+         (run_id, user_id, mode, time_ms, misses, near_misses, created_at)
+       VALUES ('invalid-ledger-row', '1', 'forged', 0, -1, -1, $1)`,
+      [clock.now()],
+    ),
+    /check/i,
+    'the immutable submission ledger independently rejects impossible fields',
+  );
+  await assert.rejects(
+    () => pool.query(
+      `INSERT INTO score_submissions
+         (run_id, user_id, mode, time_ms, misses, near_misses, created_at)
+       VALUES ('orphan-ledger-row', 'missing-user', 'practice', 20000, 0, 0, $1)`,
+      [clock.now()],
+    ),
+    /foreign key/i,
+    'the immutable submission ledger cannot orphan a player identity',
+  );
+
+  await assert.rejects(
+    () => pool.query(
       `INSERT INTO scores (user_id, mode, time_ms, misses, near_misses, achieved_at)
        VALUES ('1', 'simulation', 90000, 0, 5, $1)`,
       [clock.now()],
@@ -396,14 +577,92 @@ test('the database refuses an impossible score even if the app ever let one thro
     'a simulation time past the shot clock violates the CHECK bound',
   );
 
+  await pool.query(
+    `INSERT INTO scores (user_id, mode, time_ms, misses, near_misses, achieved_at)
+     VALUES ('1', 'practice', 20000, 0, 0, $1)`,
+    [clock.now()],
+  );
+
   await assert.rejects(
     () => pool.query(
       `INSERT INTO scores (user_id, mode, time_ms, misses, near_misses, achieved_at)
-       VALUES ('1', 'practice', 20000, 0, 0, $1)`,
+       VALUES ('1', 'simulation', 20000, -1, 0, $1)`,
       [clock.now()],
     ),
     /check/i,
-    'a win with no near misses violates the CHECK bound',
+    'negative counters still violate the CHECK bound',
+  );
+  await pool.end();
+});
+
+test('the database refuses impossible run states and negative lifetime counters', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+
+  await assert.rejects(
+    () => pool.query(
+      `INSERT INTO runs
+         (id, user_id, mode, issued_at, chase_started_at, beats, beat_counter,
+          consumed, failed, outcome)
+       VALUES ('bad-counters', '1', 'practice', $1, $1, -1, -1, false, true, 'failed')`,
+      [clock.now()],
+    ),
+    /check/i,
+  );
+
+  await assert.rejects(
+    () => pool.query(
+      `INSERT INTO runs
+         (id, user_id, mode, issued_at, chase_started_at, beats, beat_counter,
+          consumed, failed, outcome)
+       VALUES ('bad-state', '1', 'practice', $1, $1, 0, 0, true, false, 'open')`,
+      [clock.now()],
+    ),
+    /check/i,
+  );
+
+  await assert.rejects(
+    () => pool.query('UPDATE users SET session_epoch = -1 WHERE twitch_id = $1', ['1']),
+    /check/i,
+  );
+  await assert.rejects(
+    () => pool.query('UPDATE users SET challenge_fail_count = 1 WHERE twitch_id = $1', ['1']),
+    /check/i,
+    'a retry count cannot exist without its server timestamps',
+  );
+
+  const runId = await store.createRun('1', 'practice', clock.now());
+  await assert.rejects(
+    () => pool.query(
+      'UPDATE runs SET challenge_failure_counted = true WHERE id = $1',
+      [runId],
+    ),
+    /check/i,
+    'only a failed run with a started challenge can consume a mismatch strike',
+  );
+  await assert.rejects(
+    () => pool.query(
+      `UPDATE runs
+       SET challenge_count = 1,
+           challenge_started_at = $2
+       WHERE id = $1`,
+      [runId, clock.now()],
+    ),
+    /check/i,
+    'a challenge lifecycle cannot exist without a server seed',
+  );
+  await assert.rejects(
+    () => pool.query(
+      `UPDATE runs
+       SET challenge_count = 2,
+           challenge_solved_count = 2,
+           challenge_started_at = $2,
+           challenge_solved_at = $2
+       WHERE id = $1`,
+      [runId, clock.now()],
+    ),
+    /check/i,
+    'the database independently enforces one challenge per run',
   );
   await pool.end();
 });
@@ -472,7 +731,7 @@ test('run history is pruned to the newest hundred per player', async () => {
 
   let firstRun = null;
   for (let i = 0; i < RUN_HISTORY_LIMIT + 25; i += 1) {
-    const runId = await store.createRun('1', 'practice', clock.advance(1000));
+    const { runId } = await store.replaceOpenRun('1', 'practice', clock.advance(1000));
     if (i === 0) firstRun = runId;
   }
   await store.createRun('2', 'practice', clock.advance(1000));
@@ -498,7 +757,7 @@ test('a ban closes the open run, colours it and counts once', async () => {
   clock.advance(20000);
   await store.stampChaseStart(runId, clock.now());
 
-  const failure = await store.applyBan('1', 'captcha-fail', clock.now());
+  const failure = await store.applyBan('1', runId, 'captcha-fail');
   assert.equal(failure.runId, runId);
   assert.equal(failure.failReason, 'captcha-fail');
   assert.equal(failure.phase, 'chase');
@@ -512,16 +771,135 @@ test('a ban closes the open run, colours it and counts once', async () => {
   assert.equal(history.failReason, 'captcha-fail');
 
   // A second ban only recolours the already closed run.
-  assert.equal(await store.applyBan('1', 'timeout', clock.now()), null);
+  assert.equal(await store.applyBan('1', runId, 'timeout'), null);
   assert.equal((await store.getUser('1')).totalFails, 1, 'no double counting');
   assert.equal((await store.listRuns('1'))[0].failReason, 'timeout');
   await pool.end();
 });
 
+test('wrong visual matches get a short graduated retry delay, never an hour lockout', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+
+  for (let attempt = 0; attempt < CHALLENGE_RETRY_DELAYS_MS.length + 1; attempt += 1) {
+    const runId = await store.createRun('1', 'practice', clock.now());
+    await store.startChallenge(runId, '1', `seed-${attempt}`, clock.now());
+    assert.ok(await store.applyBan('1', runId, 'captcha-fail', {
+      challengeFailureAt: clock.now(),
+    }));
+
+    const retry = await store.getChallengeRetry('1');
+    const delayIndex = Math.min(attempt, CHALLENGE_RETRY_DELAYS_MS.length - 1);
+    assert.equal(retry.failureCount, attempt + 1);
+    assert.equal(
+      retry.retryAfterMs - clock.now().getTime(),
+      CHALLENGE_RETRY_DELAYS_MS[delayIndex],
+    );
+
+    // A duplicate solve/report for the same run is idempotent and cannot
+    // accelerate the ramp.
+    assert.equal(await store.applyBan('1', runId, 'captcha-fail', {
+      challengeFailureAt: clock.now(),
+    }), null);
+    assert.equal((await store.getChallengeRetry('1')).failureCount, attempt + 1);
+    clock.advance(CHALLENGE_RETRY_DELAYS_MS[delayIndex]);
+  }
+
+  assert.equal(
+    CHALLENGE_RETRY_DELAYS_MS.at(-1),
+    60000,
+    'the retry delay caps at one minute',
+  );
+  await pool.end();
+});
+
+test('a concurrent client failure report cannot hide a server-observed wrong match', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+  const runId = await store.createRun('1', 'practice', clock.now());
+  await store.startChallenge(runId, '1', 'seed', clock.now());
+
+  assert.ok(await store.applyBan('1', runId, 'captcha-fail'));
+  assert.deepEqual(await store.getChallengeRetry('1'), {
+    failureCount: 0, lastFailureAtMs: null, retryAfterMs: null,
+  });
+  assert.equal(await store.applyBan('1', runId, 'captcha-fail', {
+    challengeFailureAt: clock.now(),
+  }), null);
+  assert.equal((await store.getChallengeRetry('1')).failureCount, 1);
+
+  await store.applyBan('1', runId, 'captcha-fail', { challengeFailureAt: clock.now() });
+  assert.equal((await store.getChallengeRetry('1')).failureCount, 1, 'counted once per run');
+  await pool.end();
+});
+
+test('a correct visual solve or a quiet period clears the mismatch ramp', async () => {
+  const { pool, store, clock } = await fixture();
+  await seed(store, clock, '1');
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const runId = await store.createRun('1', 'practice', clock.now());
+    await store.startChallenge(runId, '1', `wrong-${attempt}`, clock.now());
+    await store.applyBan('1', runId, 'captcha-fail', { challengeFailureAt: clock.now() });
+    clock.advance(CHALLENGE_RETRY_DELAYS_MS[attempt]);
+  }
+  assert.equal((await store.getChallengeRetry('1')).failureCount, 2);
+
+  const solvedRun = await store.createRun('1', 'practice', clock.now());
+  await store.startChallenge(solvedRun, '1', 'correct', clock.now());
+  assert.equal(await store.solveChallenge(solvedRun, '1', 1, clock.now()), true);
+  assert.deepEqual(await store.getChallengeRetry('1'), {
+    failureCount: 0, lastFailureAtMs: null, retryAfterMs: null,
+  });
+  await store.applyBan('1', solvedRun, 'timeout');
+
+  const quietRun = await store.createRun('1', 'practice', clock.now());
+  await store.startChallenge(quietRun, '1', 'wrong-after-success', clock.now());
+  await store.applyBan('1', quietRun, 'captcha-fail', { challengeFailureAt: clock.now() });
+  clock.advance(CHALLENGE_RETRY_RESET_MS + 1);
+  const afterQuiet = await store.createRun('1', 'practice', clock.now());
+  await store.startChallenge(afterQuiet, '1', 'wrong-after-quiet', clock.now());
+  await store.applyBan('1', afterQuiet, 'captcha-fail', { challengeFailureAt: clock.now() });
+  assert.equal((await store.getChallengeRetry('1')).failureCount, 1);
+  await pool.end();
+});
+
+test('a ban counter failure rolls the run closure back for a safe retry', async () => {
+  const fixture = closureAtomicityFixture();
+  const { store, state } = fixture;
+
+  fixture.failCounters(true);
+  await assert.rejects(() => store.applyBan('1', 'run-1', 'timeout'), /counter write unavailable/);
+  fixture.failCounters(false);
+
+  assert.equal(state.failed, false);
+  assert.equal(state.totalFails, 0);
+
+  assert.ok(await store.applyBan('1', 'run-1', 'timeout'));
+  assert.equal(state.failed, true);
+  assert.equal(state.totalFails, 1);
+});
+
+test('a stale-sweep counter failure rolls every run closure back', async () => {
+  const fixture = closureAtomicityFixture();
+  const { store, state } = fixture;
+
+  fixture.failCounters(true);
+  await assert.rejects(() => store.failStaleRuns(new Date()), /counter write unavailable/);
+  fixture.failCounters(false);
+
+  assert.equal(state.failed, false);
+  assert.equal(state.totalFails, 0);
+
+  assert.equal((await store.failStaleRuns(new Date())).length, 1);
+  assert.equal(state.failed, true);
+  assert.equal(state.totalFails, 1);
+});
+
 test('a ban with no run at all is a no-op', async () => {
   const { pool, store, clock } = await fixture();
   await seed(store, clock, '1');
-  assert.equal(await store.applyBan('1', 'timeout', clock.now()), null);
+  assert.equal(await store.applyBan('1', 'missing-run', 'timeout'), null);
   assert.equal((await store.getUser('1')).totalFails, 0);
   await pool.end();
 });
@@ -535,7 +913,7 @@ test('a ban can never touch a scored run', async () => {
     clock.now(),
   );
 
-  assert.equal(await store.applyBan('1', 'captcha-fail', clock.now()), null);
+  assert.equal(await store.applyBan('1', runId, 'captcha-fail'), null);
   const [history] = await store.listRuns('1');
   assert.equal(history.outcome, 'won');
   assert.equal(history.failReason, null);

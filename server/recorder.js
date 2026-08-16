@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { clientAddress } = require('./middleware');
 
 // The attack audit trail (V3.4 rule 4). Every rejected request leaves a log
 // line, and everything worth keeping leaves a row, so the owner can watch
@@ -53,7 +54,6 @@ const LOG_ONLY_REASONS = new Set([
 const ALWAYS_PERSISTED_REASONS = Object.freeze([
   'client_flagged',
   'chain_invalid',
-  'implausible_stats',
   'invalid_signature',
   'time_exceeds_elapsed',
   'insufficient_liveness',
@@ -137,7 +137,7 @@ function createRecorder(deps) {
     inflight += 1;
     Promise.resolve()
       .then(() => store.recordRejection(
-        { userId, ipHash: ipHash(req.ip), endpoint, reason, payload },
+        { userId, ipHash: ipHash(clientAddress(req)), endpoint, reason, payload },
         now(),
       ))
       .catch((err) => log(`rejection audit write failed: ${err.code || 'error'}`))

@@ -792,12 +792,21 @@
       /* 'complete' swallows input while the victory beat plays. */
     }
 
+    function rejectSyntheticInput(e) {
+      if (e && e.isTrusted === true) { return false; }
+      sus('synthetic-input');
+      note('SYNTHETIC INPUT BLOCKED');
+      return true;
+    }
+
     function onPointerDown(e) {
+      if (rejectSyntheticInput(e)) { return; }
       if (e.cancelable) { e.preventDefault(); }
       onInput();
     }
 
     function onTouchStart(e) {
+      if (rejectSyntheticInput(e)) { return; }
       if (e.cancelable) { e.preventDefault(); }
       onInput();
     }
@@ -805,6 +814,7 @@
     function onKeyDown(e) {
       if (e.repeat) { return; }
       if (e.code === 'Space' || e.key === ' ' || e.keyCode === 32) {
+        if (rejectSyntheticInput(e)) { return; }
         e.preventDefault();
         onInput();
       }

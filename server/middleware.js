@@ -1,10 +1,26 @@
 'use strict';
 
+const { isIP } = require('node:net');
 const {
   parseCookies, verifySession, clearedSessionCookie, SESSION_COOKIE,
 } = require('./session');
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+// Railway's public edge supplies the original peer in X-Real-IP. Express's
+// req.ip instead consumes X-Forwarded-For when `trust proxy` is enabled, but
+// Railway does not document that header as the client identity and a caller can
+// supply it. Trust exactly the platform header, validate it to one IP, and fall
+// back to the socket for local development or a malformed edge request.
+function clientAddress(req) {
+  const real = req.headers && req.headers['x-real-ip'];
+  if (typeof real === 'string') {
+    const candidate = real.trim();
+    if (isIP(candidate)) return candidate;
+  }
+  const remote = req.socket && req.socket.remoteAddress;
+  return typeof remote === 'string' && remote.length > 0 ? remote : 'unknown';
+}
 
 function sendError(res, status, code, message, extra) {
   const body = { error: code, message };
@@ -162,6 +178,7 @@ function rateLimit(limiter, keyFn, limit, windowMs, onThrottle) {
 }
 
 module.exports = {
+  clientAddress,
   sendError,
   securityHeaders,
   corsFor,

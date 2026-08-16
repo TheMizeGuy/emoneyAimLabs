@@ -12,6 +12,7 @@
 // nothing.
 
 const DEFAULT_MAX_CLIENTS = 200;
+const DEFAULT_MAX_INFLIGHT_SAVES = 32;
 const KEEP_ALIVE_MS = 25000;
 // V3.6 replay depth. Matches the client's 50-line log, so a cold page load
 // can fill it completely from history alone.
@@ -21,6 +22,7 @@ function createFeed(options = {}) {
   const maxClients = options.maxClients || DEFAULT_MAX_CLIENTS;
   const keepAliveMs = options.keepAliveMs || KEEP_ALIVE_MS;
   const historySize = options.historySize || DEFAULT_HISTORY;
+  const maxInflightSaves = options.maxInflightSaves || DEFAULT_MAX_INFLIGHT_SAVES;
   const now = options.now || Date.now;
   // V3.7: optional persistence hook, called fire-and-forget on every emit so
   // the replay buffer can be reloaded after a restart (see seed below). A
@@ -33,13 +35,15 @@ function createFeed(options = {}) {
   const history = [];
   let seq = 0;
   let keepAlive = null;
+  let inflightSaves = 0;
+  let droppedSaves = 0;
 
   function startKeepAlive() {
     if (keepAlive) return;
     keepAlive = setInterval(() => {
       for (const client of clients) {
         try {
-          client.write(': keep-alive\n\n');
+          if (client.write(': keep-alive\n\n') === false) drop(client);
         } catch {
           drop(client);
         }
@@ -82,9 +86,15 @@ function createFeed(options = {}) {
     startKeepAlive();
     res.on('close', () => drop(res));
     try {
-      res.write(': connected\n\n');
+      if (res.write(': connected\n\n') === false) {
+        drop(res);
+        return () => {};
+      }
       for (const entry of history) {
-        if (entry.seq > after) res.write(entry.frame);
+        if (entry.seq > after && res.write(entry.frame) === false) {
+          drop(res);
+          break;
+        }
       }
     } catch {
       drop(res);
@@ -120,17 +130,28 @@ function createFeed(options = {}) {
     history.push({ seq, frame });
     if (history.length > historySize) history.shift();
     if (save) {
-      try {
-        Promise.resolve(save(seq, type, stamped)).catch(() => {});
-      } catch {
-        // A throwing hook must never take a request down with it.
+      if (inflightSaves >= maxInflightSaves) {
+        droppedSaves += 1;
+      } else {
+        inflightSaves += 1;
+        try {
+          Promise.resolve(save(seq, type, stamped))
+            .catch(() => {})
+            .finally(() => { inflightSaves -= 1; });
+        } catch {
+          // A throwing hook must never take a request down with it.
+          inflightSaves -= 1;
+        }
       }
     }
     if (clients.size === 0) return 0;
     let delivered = 0;
     for (const client of [...clients]) {
       try {
-        client.write(frame);
+        if (client.write(frame) === false) {
+          drop(client);
+          continue;
+        }
         delivered += 1;
       } catch {
         drop(client);
@@ -150,8 +171,16 @@ function createFeed(options = {}) {
     seed,
     closeAll,
     size: () => clients.size,
+    inflightSaves: () => inflightSaves,
+    droppedSaves: () => droppedSaves,
     maxClients,
   };
 }
 
-module.exports = { createFeed, DEFAULT_MAX_CLIENTS, KEEP_ALIVE_MS, DEFAULT_HISTORY };
+module.exports = {
+  createFeed,
+  DEFAULT_MAX_CLIENTS,
+  DEFAULT_MAX_INFLIGHT_SAVES,
+  KEEP_ALIVE_MS,
+  DEFAULT_HISTORY,
+};

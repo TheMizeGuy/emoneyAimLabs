@@ -14,7 +14,9 @@ const {
   STATE_COOKIE,
 } = require('./session');
 const { authorizeUrl } = require('./twitch');
-const { sendError, asyncRoute, rateLimit } = require('./middleware');
+const {
+  sendError, asyncRoute, rateLimit, clientAddress,
+} = require('./middleware');
 
 const AUTH_LIMIT = 10;
 const AUTH_WINDOW_MS = 60 * 1000;
@@ -25,7 +27,7 @@ function createAuthRouter(deps) {
   const router = express.Router();
 
   const authLimit = rateLimit(
-    limiter, (req) => `auth:${req.ip}`, AUTH_LIMIT, AUTH_WINDOW_MS, recorder.note,
+    limiter, (req) => `auth:${clientAddress(req)}`, AUTH_LIMIT, AUTH_WINDOW_MS, recorder.note,
   );
   // Burns each state nonce on first use, so a captured pair cannot be replayed
   // even inside its signed lifetime.
@@ -91,7 +93,10 @@ function createAuthRouter(deps) {
       log(`auth callback failed: ${err.code || 'unknown'}`);
       return sendError(res, 502, 'twitch_unavailable', 'Twitch login failed, try again');
     } finally {
-      if (accessToken) await twitch.revoke(accessToken);
+      if (accessToken) {
+        const revoked = await twitch.revoke(accessToken);
+        if (revoked === false) log('auth token revoke failed');
+      }
     }
 
     const nowDate = now();
@@ -116,8 +121,8 @@ function createAuthRouter(deps) {
 
   // Real revocation, not just a cleared cookie: bumping the stored epoch
   // retires every token this user holds, including a copy someone captured off
-  // a shared or streamed machine. Always answers 204, session or not, so it
-  // leaks nothing and is safe to call twice.
+  // a shared or streamed machine. Anonymous and repeated calls answer 204, but
+  // a database failure is explicit: clearing one browser is not revocation.
   router.post('/logout', asyncRoute(async (req, res) => {
     res.setHeader('Set-Cookie', clearedSessionCookie());
     res.setHeader('Cache-Control', 'no-store');
@@ -126,6 +131,10 @@ function createAuthRouter(deps) {
         await store.bumpSessionEpoch(req.session.sub, req.session.epoch);
       } catch (err) {
         log(`logout epoch bump failed: ${err.code || 'error'}`);
+        return sendError(
+          res, 503, 'logout_unavailable',
+          'Signed out here, but server-side revocation could not be confirmed',
+        );
       }
     }
     return res.status(204).end();

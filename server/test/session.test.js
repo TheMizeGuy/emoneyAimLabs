@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 
 const {
   signSession,
@@ -18,6 +19,12 @@ const {
 const SECRET = 'a-secret-that-is-at-least-32-characters-long';
 const NOW = 1_760_000_000_000;
 const TTL = 30 * 24 * 60 * 60 * 1000;
+
+function signedPayload(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SECRET).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
 
 test('session token round-trips', () => {
   const token = signSession(SECRET, { sub: '12345', nowMs: NOW, ttlMs: TTL });
@@ -53,6 +60,21 @@ test('session token expires', () => {
 test('session verification survives hostile input', () => {
   for (const bad of [null, undefined, '', '.', '..', 'a.b.c', 'x'.repeat(2000), 42, {}]) {
     assert.equal(verifySession(SECRET, bad, NOW), null);
+  }
+});
+
+test('session verification rejects signed but nonsensical claims', () => {
+  const invalid = [
+    { sub: 'bad player id!', iat: NOW, exp: NOW + 1000, ep: 0 },
+    { sub: '12345', iat: NOW + 1, exp: NOW + 1000, ep: 0 },
+    { sub: '12345', iat: NOW, exp: NOW - 1, ep: 0 },
+    { sub: '12345', iat: NOW, exp: NOW + TTL + 1, ep: 0 },
+    { sub: '12345', iat: 'now', exp: NOW + 1000, ep: 0 },
+    { sub: '12345', iat: NOW, exp: NOW + 1000, ep: -1 },
+    { sub: '12345', iat: NOW, exp: NOW + 1000, ep: 1.5 },
+  ];
+  for (const payload of invalid) {
+    assert.equal(verifySession(SECRET, signedPayload(payload), NOW), null);
   }
 });
 

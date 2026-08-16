@@ -20,6 +20,11 @@ const REJECTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const FEED_RETENTION = 500;
 // The stats board shows at most this many players in one response.
 const STATS_LIMIT = 200;
+// Repeated blind guesses are slowed without treating an honest mismatch as a
+// ban. The first miss has no delay; later misses ramp to one minute, and either
+// a correct solve or ten quiet minutes returns the player to zero.
+const CHALLENGE_RETRY_DELAYS_MS = Object.freeze([0, 5000, 15000, 30000, 60000]);
+const CHALLENGE_RETRY_RESET_MS = 10 * 60 * 1000;
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -49,6 +54,12 @@ function mapRun(row) {
     mode: row.mode,
     issuedAtMs: toMs(row.issued_at),
     chaseStartedAtMs: toMs(row.chase_started_at),
+    chaseStartBeats: Number(row.chase_start_beats || 0),
+    challengeSeed: row.challenge_seed === undefined ? null : row.challenge_seed,
+    challengeStartedAtMs: toMs(row.challenge_started_at),
+    challengeSolvedAtMs: toMs(row.challenge_solved_at),
+    challengeCount: Number(row.challenge_count || 0),
+    challengeSolvedCount: Number(row.challenge_solved_count || 0),
     beats: Number(row.beats),
     lastBeatAtMs: toMs(row.last_beat_at),
     beatCounter: Number(row.beat_counter || 0),
@@ -135,6 +146,20 @@ function createStore(pool) {
     return mapUser(rows[0]);
   }
 
+  async function getChallengeRetry(userId) {
+    const { rows } = await pool.query(
+      `SELECT challenge_fail_count, challenge_fail_last_at, challenge_retry_after
+       FROM users WHERE twitch_id = $1`,
+      [userId],
+    );
+    if (rows.length === 0) return null;
+    return {
+      failureCount: Number(rows[0].challenge_fail_count || 0),
+      lastFailureAtMs: toMs(rows[0].challenge_fail_last_at),
+      retryAfterMs: toMs(rows[0].challenge_retry_after),
+    };
+  }
+
   // The session epoch makes a stateless cookie revocable: it is signed into the
   // token and compared on every authenticated request, so bumping it retires
   // every cookie that user ever held. One narrow indexed read per authed call.
@@ -190,12 +215,74 @@ function createStore(pool) {
     return id;
   }
 
+  // Close-and-open is one transaction, serialised on the stable owning user
+  // row. Without that lock, two concurrent /run requests can both close
+  // nothing and then both insert an open run. The expression unique index is a
+  // second line of defence; one retry also covers a rolling deploy where an old
+  // process that does not take the user lock races this transaction.
+  async function replaceOpenRun(userId, mode, now) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const owner = await client.query(
+          'SELECT twitch_id FROM users WHERE twitch_id = $1 FOR UPDATE',
+          [userId],
+        );
+        if (owner.rows.length === 0) throw new Error('run owner disappeared');
+
+        const closed = await client.query(
+          `UPDATE runs SET failed = true, outcome = 'failed'
+           WHERE user_id = $1 AND consumed = false AND failed = false
+           RETURNING id, user_id, mode, fail_reason, chase_started_at`,
+          [userId],
+        );
+        const failures = closed.rows.map(toFailure);
+        if (failures.length > 0) {
+          const chase = failures.filter((failure) => failure.phase === 'chase').length;
+          await client.query(
+            `UPDATE users
+             SET runs_failed_total = runs_failed_total + $2,
+                 chase_fails = chase_fails + $3
+             WHERE twitch_id = $1`,
+            [userId, failures.length, chase],
+          );
+        }
+
+        const runId = newRunToken();
+        await client.query(
+          `INSERT INTO runs
+             (id, user_id, mode, issued_at, chase_started_at, beats, last_beat_at,
+              consumed, failed, outcome)
+           VALUES ($1, $2, $3, $4, $5, 0, NULL, false, false, 'open')`,
+          [runId, userId, mode, now, mode === 'practice' ? now : null],
+        );
+        await pruneUserRunsWith(client, userId, RUN_HISTORY_LIMIT);
+        await client.query('COMMIT');
+        return { runId, failures };
+      } catch (err) {
+        try {
+          await client.query('ROLLBACK');
+        } catch (_) {
+          // Preserve the original failure.
+        }
+        if (attempt === 0 && isViolation(err, UNIQUE_VIOLATION, /duplicate key|unique constraint/i)) {
+          continue;
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+    throw new Error('unreachable run replacement state');
+  }
+
   // Retention: a player keeps their newest RUN_HISTORY_LIMIT runs and nothing
   // older. Accepted scores live on in score_submissions regardless.
-  async function pruneUserRuns(userId, keep = RUN_HISTORY_LIMIT) {
+  async function pruneUserRunsWith(queryable, userId, keep) {
     // The row at offset keep-1 is the oldest run worth keeping; everything
     // strictly older than it goes.
-    const { rows } = await pool.query(
+    const { rows } = await queryable.query(
       `SELECT issued_at FROM runs
        WHERE user_id = $1
        ORDER BY issued_at DESC, id DESC
@@ -203,11 +290,15 @@ function createStore(pool) {
       [userId, Math.max(0, keep - 1)],
     );
     if (rows.length === 0) return 0;
-    const result = await pool.query(
+    const result = await queryable.query(
       'DELETE FROM runs WHERE user_id = $1 AND issued_at < $2',
       [userId, rows[0].issued_at],
     );
     return result.rowCount || 0;
+  }
+
+  async function pruneUserRuns(userId, keep = RUN_HISTORY_LIMIT) {
+    return pruneUserRunsWith(pool, userId, keep);
   }
 
   async function listRuns(userId, limit = RUN_HISTORY_LIMIT) {
@@ -233,8 +324,10 @@ function createStore(pool) {
 
   async function getRun(runId) {
     const { rows } = await pool.query(
-      `SELECT id, user_id, mode, issued_at, chase_started_at, beats, last_beat_at,
-              beat_counter, consumed, failed
+      `SELECT id, user_id, mode, issued_at, chase_started_at, chase_start_beats,
+              beats, last_beat_at, beat_counter,
+              challenge_seed, challenge_started_at, challenge_solved_at,
+              challenge_count, challenge_solved_count, consumed, failed
        FROM runs WHERE id = $1`,
       [runId],
     );
@@ -246,12 +339,103 @@ function createStore(pool) {
   // its chase clock.
   async function stampChaseStart(runId, now) {
     const { rows } = await pool.query(
-      `UPDATE runs SET chase_started_at = $2
+      `UPDATE runs SET chase_started_at = $2, chase_start_beats = beats
        WHERE id = $1 AND chase_started_at IS NULL AND consumed = false AND failed = false
-       RETURNING chase_started_at`,
+       RETURNING chase_started_at, chase_start_beats`,
       [runId, now],
     );
     return rows.length > 0;
+  }
+
+  // Opens the one server-witnessed visual challenge. A duplicate start while
+  // it is open is harmless and does not reset its timer; once solved, no later
+  // request can reopen it or replace the timestamps scoring will validate.
+  async function startChallenge(runId, userId, challengeSeed, now) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const owner = await client.query(
+        `SELECT twitch_id, challenge_retry_after
+         FROM users WHERE twitch_id = $1 FOR UPDATE`,
+        [userId],
+      );
+      if (owner.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const retryAfterMs = toMs(owner.rows[0].challenge_retry_after);
+      if (retryAfterMs !== null && retryAfterMs > now.getTime()) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const { rows } = await client.query(
+        `UPDATE runs
+         SET challenge_seed = $3,
+             challenge_started_at = $4,
+             challenge_solved_at = NULL,
+             challenge_count = challenge_count + 1
+         WHERE id = $1 AND user_id = $2
+           AND consumed = false AND failed = false
+           AND challenge_count = 0
+           AND challenge_started_at IS NULL
+           AND challenge_solved_at IS NULL
+         RETURNING challenge_count`,
+        [runId, userId, challengeSeed, now],
+      );
+      await client.query('COMMIT');
+      return rows.length > 0;
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* preserve original */ }
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Completes exactly the challenge the API just validated. The count in the
+  // predicate prevents a delayed or fabricated request from changing cycles.
+  async function solveChallenge(runId, userId, challengeCount, now) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const owner = await client.query(
+        'SELECT twitch_id FROM users WHERE twitch_id = $1 FOR UPDATE',
+        [userId],
+      );
+      if (owner.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+      const { rows } = await client.query(
+        `UPDATE runs
+         SET challenge_solved_at = $4,
+             challenge_solved_count = challenge_count
+         WHERE id = $1 AND user_id = $2
+           AND challenge_count = $3
+           AND challenge_started_at IS NOT NULL
+           AND challenge_solved_at IS NULL
+           AND consumed = false AND failed = false
+         RETURNING challenge_solved_count`,
+        [runId, userId, challengeCount, now],
+      );
+      if (rows.length > 0) {
+        await client.query(
+          `UPDATE users
+           SET challenge_fail_count = 0,
+               challenge_fail_last_at = NULL,
+               challenge_retry_after = NULL
+           WHERE twitch_id = $1`,
+          [userId],
+        );
+      }
+      await client.query('COMMIT');
+      return rows.length > 0;
+    } catch (err) {
+      try { await client.query('ROLLBACK'); } catch { /* preserve original */ }
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   // Credits a heartbeat only when the server's own clock says it is spaced far
@@ -268,7 +452,9 @@ function createStore(pool) {
   // value, and not every Postgres-compatible engine evaluates a SET list
   // simultaneously.
   async function countBeat(runId, now, options) {
-    const { minSpacingMs, maxAgeMs, expectedCounter, gapMs } = options;
+    const {
+      minSpacingMs, maxAgeMs, expectedCounter, gapMs, allowUnspaced = false,
+    } = options;
     const spacingCutoff = new Date(now.getTime() - minSpacingMs);
     const ageCutoff = new Date(now.getTime() - maxAgeMs);
     const { rows } = await pool.query(
@@ -284,9 +470,9 @@ function createStore(pool) {
          AND failed = false
          AND issued_at > $3
          AND beat_counter = $6
-         AND (last_beat_at IS NULL OR last_beat_at <= $4)
+         AND ($7 = true OR last_beat_at IS NULL OR last_beat_at <= $4)
        RETURNING beats, beat_counter`,
-      [runId, now, ageCutoff, spacingCutoff, gapMs, expectedCounter],
+      [runId, now, ageCutoff, spacingCutoff, gapMs, expectedCounter, allowUnspaced],
     );
     if (rows.length === 0) return { counted: false };
     return {
@@ -354,9 +540,9 @@ function createStore(pool) {
   // Two lifetime counters move together: every failure raises the total, and a
   // failure that had reached the chase also raises the chase count. A run
   // abandoned during the flappy gauntlet raises only the total.
-  async function addFailCounts(userId, totals) {
+  async function addFailCounts(userId, totals, queryable = pool) {
     if (totals.total <= 0) return;
-    await pool.query(
+    await queryable.query(
       `UPDATE users
        SET runs_failed_total = runs_failed_total + $2,
            chase_fails = chase_fails + $3
@@ -377,7 +563,7 @@ function createStore(pool) {
     };
   }
 
-  async function applyFailCounts(failures) {
+  async function applyFailCounts(failures, queryable = pool) {
     const tally = new Map();
     for (const failure of failures) {
       const current = tally.get(failure.userId) || { total: 0, chase: 0 };
@@ -386,28 +572,46 @@ function createStore(pool) {
       tally.set(failure.userId, current);
     }
     for (const [userId, totals] of tally) {
-      await addFailCounts(userId, totals);
+      await addFailCounts(userId, totals, queryable);
+    }
+  }
+
+  async function closeRunsAndCount(sql, params) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows } = await client.query(sql, params);
+      const failures = rows.map(toFailure);
+      await applyFailCounts(failures, client);
+      await client.query('COMMIT');
+      return failures;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the original failure.
+      }
+      throw err;
+    } finally {
+      client.release();
     }
   }
 
   // Called before a user opens a new run: whatever they left open is over.
   // This is also what enforces one open run per user.
   async function failOpenRunsForUser(userId) {
-    const { rows } = await pool.query(
+    return closeRunsAndCount(
       `UPDATE runs SET failed = true, outcome = 'failed'
        WHERE user_id = $1 AND consumed = false AND failed = false
        RETURNING id, user_id, mode, fail_reason, chase_started_at`,
       [userId],
     );
-    const failures = rows.map(toFailure);
-    await applyFailCounts(failures);
-    return failures;
   }
 
   // Sweep for players who closed the tab: no heartbeat for RUN_STALE_MS.
   async function failStaleRuns(now, staleMs = RUN_STALE_MS) {
     const cutoff = new Date(now.getTime() - staleMs);
-    const { rows } = await pool.query(
+    return closeRunsAndCount(
       `UPDATE runs SET failed = true, outcome = 'failed'
        WHERE consumed = false
          AND failed = false
@@ -415,44 +619,89 @@ function createStore(pool) {
        RETURNING id, user_id, mode, fail_reason, chase_started_at`,
       [cutoff],
     );
-    const failures = rows.map(toFailure);
-    await applyFailCounts(failures);
-    return failures;
   }
 
   // A ban is the client's word for why a run ended. It colours the feed and the
   // player's history and can never touch a leaderboard row. When the run it
   // lands on is still open, closing it here is what makes the failure stream
   // immediately instead of waiting for the stale sweep.
-  async function applyBan(userId, reason, now) {
-    const { rows } = await pool.query(
-      `SELECT id, outcome FROM runs
-       WHERE user_id = $1 AND consumed = false AND outcome IN ('open', 'failed')
-       ORDER BY CASE WHEN outcome = 'open' THEN 0 ELSE 1 END, issued_at DESC, id DESC
-       LIMIT 1`,
-      [userId],
-    );
-    if (rows.length === 0) return null;
+  async function applyBan(userId, runId, reason, options = {}) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const owner = await client.query(
+        `SELECT twitch_id, challenge_fail_count, challenge_fail_last_at
+         FROM users WHERE twitch_id = $1 FOR UPDATE`,
+        [userId],
+      );
+      if (owner.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return null;
+      }
+      const closed = await client.query(
+        `UPDATE runs SET failed = true, outcome = 'failed', fail_reason = $2
+         WHERE id = $1 AND user_id = $3 AND consumed = false AND failed = false
+         RETURNING id, user_id, mode, fail_reason, chase_started_at`,
+        [runId, reason, userId],
+      );
+      const failure = closed.rows.length > 0 ? toFailure(closed.rows[0]) : null;
+      if (failure) await applyFailCounts([failure], client);
 
-    const closed = await pool.query(
-      `UPDATE runs SET failed = true, outcome = 'failed', fail_reason = $2
-       WHERE id = $1 AND consumed = false AND failed = false
-       RETURNING id, user_id, mode, fail_reason, chase_started_at`,
-      [rows[0].id, reason],
-    );
-    if (closed.rows.length > 0) {
-      const failure = toFailure(closed.rows[0]);
-      await applyFailCounts([failure]);
+      const failedAt = options.challengeFailureAt;
+      if (failedAt instanceof Date && Number.isFinite(failedAt.getTime())) {
+        // This marker belongs to the server-observed answer, not the client's
+        // cosmetic ban event. It makes a concurrent/duplicate report count at
+        // most once even if that report happened to close the run first.
+        const counted = await client.query(
+          `UPDATE runs SET challenge_failure_counted = true
+           WHERE id = $1 AND user_id = $2
+             AND failed = true
+             AND challenge_count = 1
+             AND challenge_started_at IS NOT NULL
+             AND challenge_failure_counted = false
+           RETURNING id`,
+          [runId, userId],
+        );
+        if (counted.rows.length > 0) {
+          const previousAtMs = toMs(owner.rows[0].challenge_fail_last_at);
+          const previousCount = Number(owner.rows[0].challenge_fail_count || 0);
+          const quiet = previousAtMs === null
+            || failedAt.getTime() - previousAtMs > CHALLENGE_RETRY_RESET_MS;
+          const failureCount = quiet ? 1 : previousCount + 1;
+          const delay = CHALLENGE_RETRY_DELAYS_MS[
+            Math.min(failureCount - 1, CHALLENGE_RETRY_DELAYS_MS.length - 1)
+          ];
+          await client.query(
+            `UPDATE users
+             SET challenge_fail_count = $2,
+                 challenge_fail_last_at = $3,
+                 challenge_retry_after = $4
+             WHERE twitch_id = $1`,
+            [userId, failureCount, failedAt, new Date(failedAt.getTime() + delay)],
+          );
+        }
+      }
+
+      // The named run was already closed by the sweep or by a replacement;
+      // only its reason is new. Binding this update to the run id is critical:
+      // a late event from an old attempt must never select the newer open run.
+      await client.query(
+        `UPDATE runs SET fail_reason = $2
+         WHERE id = $1 AND user_id = $3 AND consumed = false AND failed = true`,
+        [runId, reason, userId],
+      );
+      await client.query('COMMIT');
       return failure;
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the original failure.
+      }
+      throw err;
+    } finally {
+      client.release();
     }
-
-    // The run was already closed by the sweep or by a new run; only the reason
-    // is new, so nothing is counted twice and nothing is streamed twice.
-    await pool.query(
-      'UPDATE runs SET fail_reason = $2 WHERE id = $1 AND consumed = false',
-      [rows[0].id, reason],
-    );
-    return null;
   }
 
   // Flappy deaths happen before a run exists, so they are client-reported.
@@ -524,8 +773,15 @@ function createStore(pool) {
          FROM scores WHERE user_id = $1 AND mode = $2`,
         [entry.userId, entry.mode],
       );
+      const best = mapScore(rows[0]);
+      // Rank is part of the committed response, so compute it before COMMIT.
+      // A failure here rolls the score back instead of returning a 500 after
+      // the run has already been irreversibly consumed.
+      const rank = await rankWith(
+        client, entry.userId, entry.mode, best.timeMs, best.achievedAt,
+      );
       await client.query('COMMIT');
-      return { ok: true, best: mapScore(rows[0]) };
+      return { ok: true, best, rank };
     } catch (err) {
       try {
         await client.query('ROLLBACK');
@@ -540,8 +796,8 @@ function createStore(pool) {
 
   // Rank ordering matches the leaderboard ordering exactly:
   // time ascending, then earliest achievement, then user id.
-  async function rankOf(userId, mode, timeMs, achievedAt) {
-    const { rows } = await pool.query(
+  async function rankWith(queryable, userId, mode, timeMs, achievedAt) {
+    const { rows } = await queryable.query(
       `SELECT COUNT(*) AS better FROM scores
        WHERE mode = $1
          AND (time_ms < $2
@@ -550,6 +806,10 @@ function createStore(pool) {
       [mode, timeMs, achievedAt, userId],
     );
     return Number(rows[0].better) + 1;
+  }
+
+  async function rankOf(userId, mode, timeMs, achievedAt) {
+    return rankWith(pool, userId, mode, timeMs, achievedAt);
   }
 
   async function getScore(userId, mode) {
@@ -650,13 +910,17 @@ function createStore(pool) {
   return {
     upsertUser,
     getUser,
+    getChallengeRetry,
     getUsers,
     createRun,
+    replaceOpenRun,
     getRun,
     listRuns,
     pruneUserRuns,
     countWins,
     stampChaseStart,
+    startChallenge,
+    solveChallenge,
     countBeat,
     beatTelemetry,
     recordRejection,
@@ -685,4 +949,6 @@ module.exports = {
   RUN_HISTORY_LIMIT,
   RUN_STALE_MS,
   REJECTION_RETENTION_MS,
+  CHALLENGE_RETRY_DELAYS_MS,
+  CHALLENGE_RETRY_RESET_MS,
 };

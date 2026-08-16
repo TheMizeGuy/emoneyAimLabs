@@ -24,6 +24,7 @@ const {
 const chain = require('../chain');
 const { createRateLimiter } = require('../ratelimit');
 const { loadConfig } = require('../config');
+const { CHALLENGE_ROUNDS } = require('../challenge');
 const { TEST_ENV } = require('./helpers');
 
 const RUN_ID = newRunToken();
@@ -31,18 +32,35 @@ const CHAIN = 'a'.repeat(32);
 const FLOORS = { practice: 8000, simulation: 15000 };
 
 function baseRun(overrides = {}) {
-  return {
+  const run = {
     id: RUN_ID,
     userId: 'user-1',
     mode: 'practice',
     issuedAtMs: 1000000,
     chaseStartedAtMs: 1000000,
+    challengeSeed: 'a'.repeat(43),
+    challengeStartedAtMs: 1005000,
+    challengeSolvedAtMs: 1008000,
+    challengeCount: 1,
+    challengeSolvedCount: 1,
     beats: 100,
     beatCounter: 0,
     consumed: false,
     failed: false,
     ...overrides,
   };
+  if (run.mode === 'simulation') {
+    if (!Object.hasOwn(overrides, 'challengeStartedAtMs')) {
+      run.challengeStartedAtMs = Math.max(
+        run.issuedAtMs + LIMITS.MIN_FLAPPY_PHASE_MS,
+        run.chaseStartedAtMs - LIMITS.MIN_CHALLENGE_SOLVE_MS,
+      );
+    }
+    if (!Object.hasOwn(overrides, 'challengeSolvedAtMs')) {
+      run.challengeSolvedAtMs = run.challengeStartedAtMs + LIMITS.MIN_CHALLENGE_SOLVE_MS;
+    }
+  }
+  return run;
 }
 
 // Checks a claim against a run, with `now` expressed as an offset from the
@@ -93,12 +111,12 @@ test('mode and player id validation', () => {
 });
 
 test('requiredBeats is driven off the server window and never falls below the floor', () => {
-  // The clamp is the point: without it the requirement collapses to zero for a
-  // short window, which is exactly the claim worth forging.
-  assert.equal(requiredBeats(0), 2);
-  assert.equal(requiredBeats(8000), 2);
-  assert.equal(requiredBeats(9999), 2);
-  assert.equal(requiredBeats(14999), 2);
+  // A real Chase can end after the first witnessed beat. Requiring two paced
+  // beats silently imposed a four-second floor the engine itself does not have.
+  assert.equal(requiredBeats(0), 1);
+  assert.equal(requiredBeats(8000), 1);
+  assert.equal(requiredBeats(9999), 1);
+  assert.equal(requiredBeats(14999), 1);
   // From 15 s the window drives it: floor(w/5000) - 1.
   assert.equal(requiredBeats(15000), 2);
   assert.equal(requiredBeats(20000), 3);
@@ -108,7 +126,7 @@ test('requiredBeats is driven off the server window and never falls below the fl
 
 // The false-reject safety proof. The client beats at chase t=0 then every 5 s
 // (unchanged by this fix), so a run of length T carries floor(T/5000) + 1
-// credited beats, and the server demands max(2, floor(T/5000) - 1).
+// credited beats, and the server demands max(1, floor(T/5000) - 1).
 test('every legitimate cadence clears the liveness bar', () => {
   for (const windowMs of [8000, 9000, 10000, 12000, 15000, 20000, 30000, 45000, 60000, 120000]) {
     const credited = Math.floor(windowMs / 5000) + 1;
@@ -139,19 +157,41 @@ test('parseBeatBody requires a run token and a chain token', () => {
   assert.equal(parseBeatBody('string').code, 'invalid_body');
 });
 
-test('parseEventBody accepts only known types and ban reasons', () => {
+test('parseEventBody accepts only known types, complete challenge answers and ban reasons', () => {
   assert.deepEqual(parseEventBody({ type: 'flappy_death' }).value, { type: 'flappy_death' });
+  assert.deepEqual(
+    parseEventBody({ type: 'challenge_start', runId: RUN_ID }).value,
+    { type: 'challenge_start', runId: RUN_ID },
+  );
+  const answers = Array.from({ length: CHALLENGE_ROUNDS }, (_, index) => index % 4);
+  assert.deepEqual(
+    parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers }).value,
+    { type: 'challenge_solve', runId: RUN_ID, answers },
+  );
+  assert.equal(parseEventBody({ type: 'challenge_start' }).code, 'invalid_run_id');
+  assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID }).code, 'invalid_challenge_answer');
+  assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers: [0, 1] }).code,
+    'invalid_challenge_answer');
+  const outOfRange = answers.slice();
+  outOfRange[outOfRange.length - 1] = 4;
+  assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers: outOfRange }).code,
+    'invalid_challenge_answer');
   for (const reason of BAN_REASONS) {
-    assert.deepEqual(parseEventBody({ type: 'ban', reason }).value, { type: 'ban', reason });
+    assert.deepEqual(
+      parseEventBody({ type: 'ban', reason, runId: RUN_ID }).value,
+      { type: 'ban', reason, runId: RUN_ID },
+    );
   }
   assert.equal(parseEventBody({ type: 'ban' }).code, 'invalid_ban_reason');
+  assert.equal(parseEventBody({ type: 'ban', reason: 'timeout' }).code, 'invalid_run_id');
+  assert.equal(parseEventBody({ type: 'ban', reason: 'timeout', runId: 'old' }).code, 'invalid_run_id');
   assert.equal(parseEventBody({ type: 'ban', reason: 'because' }).code, 'invalid_ban_reason');
   assert.equal(parseEventBody({ type: 'chase_win' }).code, 'invalid_event_type');
   assert.equal(parseEventBody({ type: 'FLAPPY_DEATH' }).code, 'invalid_event_type');
   assert.equal(parseEventBody(null).code, 'invalid_body');
 });
 
-test('parseScoreBody enforces types, sanity caps and plausibility floors', () => {
+test('parseScoreBody enforces types and sanity caps without trusting cosmetic counters', () => {
   const good = parseScoreBody(claim());
   assert.equal(good.ok, true);
   assert.equal(good.value.runId, RUN_ID);
@@ -166,9 +206,10 @@ test('parseScoreBody enforces types, sanity caps and plausibility floors', () =>
   assert.equal(parseScoreBody(claim({ misses: -1 })).code, 'stats_out_of_range');
   assert.equal(parseScoreBody(claim({ nearMisses: 10001 })).code, 'stats_out_of_range');
 
-  // The forgery this exists to kill: a flawless run with nothing near it.
-  assert.equal(parseScoreBody(claim({ misses: 0, nearMisses: 0 })).code, 'implausible_stats');
-  assert.equal(parseScoreBody(claim({ nearMisses: 2 })).code, 'implausible_stats');
+  // These are client-reported display stats, not security evidence. A real
+  // one-approach win can produce one sample, while a forger can simply claim 3.
+  assert.equal(parseScoreBody(claim({ misses: 0, nearMisses: 0 })).ok, true);
+  assert.equal(parseScoreBody(claim({ nearMisses: 2 })).ok, true);
   assert.equal(parseScoreBody(claim({ nearMisses: 3 })).ok, true);
 
   // Attestation must be present, well formed, and report a clean run.
@@ -215,6 +256,88 @@ test('score validation accepts an honest practice run', () => {
   assert.equal(verdict.value.chasePhaseMs, 21000);
 });
 
+test('score validation requires a fresh server-witnessed visual challenge', () => {
+  assert.equal(
+    check(baseRun({
+      challengeSeed: null,
+      challengeStartedAtMs: null,
+      challengeSolvedAtMs: null,
+      challengeCount: 0,
+      challengeSolvedCount: 0,
+    }), 20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({ challengeSolvedAtMs: null, challengeSolvedCount: 0 }), 20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({ challengeCount: 2, challengeSolvedCount: 1 }), 20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({ challengeCount: 2, challengeSolvedCount: 2 }), 20000, 21000).code,
+    'challenge_required',
+    'one solved puzzle cannot be replayed into a second server cycle',
+  );
+  assert.equal(
+    check(baseRun({
+      challengeStartedAtMs: 1005000,
+      challengeSolvedAtMs: 1005000 + LIMITS.MIN_CHALLENGE_SOLVE_MS - 1,
+    }), 20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({
+      challengeStartedAtMs: 1005000,
+      challengeSolvedAtMs: 1005000 + LIMITS.MIN_CHALLENGE_SOLVE_MS,
+    }), 20000, 21000).ok,
+    true,
+  );
+
+  assert.equal(check(baseRun({
+    challengeStartedAtMs: 1000000 + LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS - 1,
+    challengeSolvedAtMs: 1000000 + LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS
+      + LIMITS.MIN_CHALLENGE_SOLVE_MS,
+  }), 20000, 21000).code, 'challenge_required',
+  'Practice cannot start verification before its requested random window');
+  assert.equal(check(baseRun({
+    challengeStartedAtMs: 1000000 + LIMITS.MAX_PRACTICE_CHALLENGE_OFFSET_MS + 1,
+    challengeSolvedAtMs: 1000000 + LIMITS.MAX_PRACTICE_CHALLENGE_OFFSET_MS
+      + LIMITS.MIN_CHALLENGE_SOLVE_MS + 1,
+  }), 20000, 21000).code, 'challenge_required',
+  'Practice cannot defer verification until an arbitrary later point');
+
+  const simulation = baseRun({
+    mode: 'simulation',
+    issuedAtMs: 1000000,
+    chaseStartedAtMs: 1020000,
+    chaseStartBeats: 4,
+    challengeStartedAtMs: 1016000,
+    challengeSolvedAtMs: 1016000 + LIMITS.MIN_CHALLENGE_SOLVE_MS,
+  });
+  assert.equal(check(simulation, 20000, 21000).ok, true,
+    'Simulation accepts a challenge between Flappy and Chase');
+  assert.equal(check(baseRun({
+    ...simulation,
+    challengeStartedAtMs: 1020001,
+    challengeSolvedAtMs: 1020001 + LIMITS.MIN_CHALLENGE_SOLVE_MS,
+  }), 20000, 21000).code, 'challenge_required',
+  'Simulation cannot move the challenge into its scored Chase window');
+  assert.equal(check(baseRun({
+    ...simulation,
+    challengeStartedAtMs: 1000000 + LIMITS.MIN_FLAPPY_PHASE_MS - 1,
+    challengeSolvedAtMs: 1000000 + LIMITS.MIN_FLAPPY_PHASE_MS
+      + LIMITS.MIN_CHALLENGE_SOLVE_MS,
+  }), 20000, 21000).code, 'challenge_required',
+  'Simulation cannot overlap verification with the minimum Flappy window');
+  assert.equal(check(baseRun({
+    ...simulation,
+    challengeSolvedAtMs: 1020000 - LIMITS.MAX_CHALLENGE_TO_CHASE_MS - 1,
+  }), 20000, 21000).code, 'challenge_required',
+  'Simulation cannot solve verification and then defer Chase indefinitely');
+});
+
 test('score validation rejects unknown, foreign, replayed and closed runs', () => {
   assert.equal(check(null, 20000, 21000).code, 'run_not_found');
   assert.equal(check(baseRun({ userId: 'someone-else' }), 20000, 21000).code, 'run_not_found');
@@ -243,12 +366,14 @@ test('score validation enforces the gauntlet phase for simulation runs', () => {
       mode: 'simulation',
       issuedAtMs,
       chaseStartedAtMs: issuedAtMs + flappyPhaseMs,
+      chaseStartBeats: 4,
     });
   }
   // Ten pipes cannot be cleared in three seconds.
   assert.equal(check(sim(3000), 20000, 21000).code, 'flappy_phase_too_short');
   assert.equal(check(sim(11999), 20000, 21000).code, 'flappy_phase_too_short');
-  assert.equal(check(sim(12000), 20000, 21000).ok, true);
+  assert.equal(check(sim(LIMITS.MIN_FLAPPY_PHASE_MS + LIMITS.MIN_CHALLENGE_SOLVE_MS),
+    20000, 21000).ok, true);
   // Nor can a run sit in the gauntlet for an hour.
   assert.equal(check(sim(LIMITS.MAX_FLAPPY_PHASE_MS + 1), 20000, 21000).code, 'run_expired');
   // Practice has no gauntlet, so the rule does not apply to it.
@@ -260,26 +385,94 @@ test('score validation expires old runs and old chases', () => {
   const ancient = baseRun({ issuedAtMs: 0, chaseStartedAtMs: 0 });
   assert.equal(check(ancient, 20000, LIMITS.MAX_RUN_AGE_MS + 1).code, 'run_expired');
   // Chase phase window. A window this long needs a matching beat count, hence
-  // the explicit beats here - see the divergence test below.
+  // the explicit beats here. Practice's three-second challenge is excluded
+  // from the score that must match the server window.
   assert.equal(check(baseRun({ beats: 200 }), 20000, LIMITS.RUN_TTL_MS + 1).code, 'run_expired');
-  assert.equal(check(baseRun({ beats: 200 }), 20000, LIMITS.RUN_TTL_MS).ok, true);
+  assert.equal(
+    check(baseRun({ beats: 200 }), LIMITS.RUN_TTL_MS - 3000, LIMITS.RUN_TTL_MS).ok,
+    true,
+  );
   // A clock that runs backwards.
   assert.equal(check(baseRun(), 20000, -5000).code, 'run_expired');
 });
 
 test('score validation rejects a time longer than the chase the server timed', () => {
   assert.equal(check(baseRun(), 20000, 16000).code, 'time_exceeds_elapsed');
-  assert.equal(check(baseRun(), 20000, 17001).ok, true, 'three seconds of tolerance');
+  assert.equal(
+    check(baseRun(), 20000, 20000).ok,
+    true,
+    'three seconds beyond the scored server window is tolerated',
+  );
+});
+
+test('score validation rejects a claim materially shorter than the server clock', () => {
+  const waitedOut = check(baseRun({ beats: 5, lastBeatAtMs: 1021000 }), 8000, 21000);
+  assert.equal(waitedOut.code, 'time_below_elapsed');
+
+  const networkMargin = check(baseRun({ beats: 5, lastBeatAtMs: 1021000 }), 19500, 21000);
+  assert.equal(networkMargin.ok, true, 'ordinary request timing stays inside the lower allowance');
+});
+
+test('Practice verification time is excluded from the server-observed score window', () => {
+  const run = baseRun({
+    challengeStartedAtMs: 1005000,
+    challengeSolvedAtMs: 1010000,
+    beats: 5,
+    lastBeatAtMs: 1025000,
+  });
+  assert.equal(check(run, 20000, 25000).ok, true,
+    'five seconds spent on the puzzle does not inflate a 20 second score');
+  assert.equal(check(run, 16000, 25000).code, 'time_below_elapsed');
+  assert.equal(check(run, 24000, 25000).code, 'time_exceeds_elapsed');
 });
 
 test('score validation rejects a run without enough credited heartbeats', () => {
-  // A 61 s window needs floor(61000/5000) - 1 = 11 credited beats.
+  // The three-second Practice challenge is excluded, so the 58 s scored window
+  // needs floor(58000/5000) - 1 = 10 credited beats.
   const verdict = check(baseRun({ beats: 7, lastBeatAtMs: 1060000 }), 60000, 61000);
   assert.equal(verdict.code, 'insufficient_liveness');
   assert.equal(verdict.detail.reason, 'count');
-  assert.equal(verdict.detail.needed, 11);
+  assert.equal(verdict.detail.needed, 10);
   assert.equal(verdict.detail.beats, 7);
-  assert.equal(check(baseRun({ beats: 11, lastBeatAtMs: 1060000 }), 60000, 61000).ok, true);
+  assert.equal(check(baseRun({ beats: 10, lastBeatAtMs: 1060000 }), 60000, 61000).ok, true);
+});
+
+test('simulation chase liveness cannot be prepaid during the flappy phase', () => {
+  const issuedAtMs = 1000000;
+  const run = baseRun({
+    mode: 'simulation',
+    issuedAtMs,
+    chaseStartedAtMs: issuedAtMs + 55000,
+    // Eleven paced beats landed before Chase. Only the final fresh beat landed
+    // during Chase, so this is not a server-witnessed 60-second chase.
+    chaseStartBeats: 11,
+    beats: 12,
+    lastBeatAtMs: issuedAtMs + 115000,
+  });
+
+  const verdict = check(run, 60000, 60000);
+  assert.equal(verdict.code, 'insufficient_liveness');
+  assert.equal(verdict.detail.phase, 'chase');
+  assert.equal(verdict.detail.beats, 1);
+  assert.equal(verdict.detail.needed, 11);
+});
+
+test('simulation requires server-witnessed liveness during the flappy phase too', () => {
+  const issuedAtMs = 1000000;
+  const run = baseRun({
+    mode: 'simulation',
+    issuedAtMs,
+    chaseStartedAtMs: issuedAtMs + 20000,
+    chaseStartBeats: 1,
+    beats: 20,
+    lastBeatAtMs: issuedAtMs + 39000,
+  });
+
+  const verdict = check(run, 20000, 20000);
+  assert.equal(verdict.code, 'insufficient_liveness');
+  assert.equal(verdict.detail.phase, 'flappy');
+  assert.equal(verdict.detail.beats, 1);
+  assert.equal(verdict.detail.needed, 3);
 });
 
 test('no score is accepted with zero beats, however short the window', () => {
@@ -289,10 +482,11 @@ test('no score is accepted with zero beats, however short the window', () => {
   const forged = check(baseRun({ beats: 0, lastBeatAtMs: null }), 8000, 8100);
   assert.equal(forged.code, 'insufficient_liveness');
   assert.equal(forged.detail.reason, 'count');
-  assert.equal(forged.detail.needed, 2);
+  assert.equal(forged.detail.needed, 1);
 
-  // One beat is still not enough.
-  assert.equal(check(baseRun({ beats: 1, lastBeatAtMs: 1008000 }), 8000, 8100).ok, false);
+  // One fresh, server-credited witness is the physical minimum for a sub-15 s
+  // Chase and must not invent a longer gameplay floor.
+  assert.equal(check(baseRun({ beats: 1, lastBeatAtMs: 1008000 }), 8000, 8100).ok, true);
 });
 
 test('beats must straddle the window, not cluster at its start', () => {
@@ -329,41 +523,50 @@ test('beats must straddle the window, not cluster at its start', () => {
     61000,
   );
   assert.equal(pastBound.detail.reason, 'stale');
+
+  // A wall-clock rollback or corrupt future timestamp must fail closed rather
+  // than turning a negative age into a permanently fresh heartbeat.
+  const fromFuture = check(
+    baseRun({ issuedAtMs, chaseStartedAtMs: issuedAtMs, beats: 40, lastBeatAtMs: issuedAtMs + 61001 }),
+    60000,
+    61000,
+  );
+  assert.equal(fromFuture.code, 'insufficient_liveness');
+  assert.equal(fromFuture.detail.reason, 'stale');
+  assert.equal(fromFuture.detail.lastBeatAgeMs, -1);
 });
 
-// A player who alt-tabs to answer a message, or who trips the window-too-small
-// pause dialog, leaves the server window running while their run timer does
-// not. Scaling the beat requirement by the window alone rejected them for a
-// legitimate win - invisibly, and with no way to recover. The requirement is
-// therefore scaled by the SHORTER of the window and the time they claim.
-test('a paused or backgrounded chase is judged on the time it claims', () => {
+// A timer-free pause is itself an exploit: a modified client could idle behind
+// the small-window dialog while the server witnessed a long run, then submit a
+// much shorter claim. Both clocks now charge pauses. Only the server-timestamped
+// Practice challenge is excluded from the scored window.
+test('a paused or backgrounded chase cannot submit a timer-free score', () => {
   const issuedAtMs = 1000000;
-  // 20 s of play inside a 140 s server window, with the beats a throttled tab
-  // would actually have managed.
   const paused = check(
     baseRun({ issuedAtMs, chaseStartedAtMs: issuedAtMs, beats: 5 }),
     20000,
     140000,
   );
-  assert.equal(paused.ok, true, 'two minutes away must not cost a real win');
+  assert.equal(paused.code, 'time_below_elapsed');
 
-  // A long pause with an honest long claim is still judged on the claim.
-  const longPause = check(
-    baseRun({ issuedAtMs, chaseStartedAtMs: issuedAtMs, beats: 12 }),
-    45000,
-    600000,
+  // A claim matching that wall-clock window remains valid with matching
+  // liveness. The default Practice challenge removes three seconds.
+  const honest = check(
+    baseRun({ issuedAtMs, chaseStartedAtMs: issuedAtMs, beats: 28 }),
+    137000,
+    140000,
   );
-  assert.equal(longPause.ok, true);
+  assert.equal(honest.ok, true);
 
-  // What the shorter window does NOT do is let a run through with no beats.
+  // Matching the time is not enough without heartbeats spanning the run.
   const empty = check(
     baseRun({ issuedAtMs, chaseStartedAtMs: issuedAtMs, beats: 1 }),
-    20000,
+    137000,
     140000,
   );
   assert.equal(empty.code, 'insufficient_liveness');
   assert.equal(empty.detail.reason, 'count');
-  assert.equal(empty.detail.needed, 3, 'scaled by the 23 s claim, not the 140 s window');
+  assert.equal(empty.detail.needed, 26);
 });
 
 test('score validation enforces the per-mode floor', () => {
@@ -372,7 +575,7 @@ test('score validation enforces the per-mode floor', () => {
 
   const issuedAtMs = 1000000;
   const sim = baseRun({
-    mode: 'simulation', issuedAtMs, chaseStartedAtMs: issuedAtMs + 20000,
+    mode: 'simulation', issuedAtMs, chaseStartedAtMs: issuedAtMs + 20000, chaseStartBeats: 4,
   });
   assert.equal(check(sim, 14999, 16000).code, 'below_floor');
   assert.equal(check(sim, 15000, 16000).ok, true);
@@ -381,7 +584,7 @@ test('score validation enforces the per-mode floor', () => {
 test('score validation enforces the simulation shot clock ceiling', () => {
   const issuedAtMs = 1000000;
   const sim = baseRun({
-    mode: 'simulation', issuedAtMs, chaseStartedAtMs: issuedAtMs + 20000,
+    mode: 'simulation', issuedAtMs, chaseStartedAtMs: issuedAtMs + 20000, chaseStartBeats: 4,
   });
   assert.equal(check(sim, 61000, 62000).ok, true);
   assert.equal(check(sim, 61001, 62000).code, 'above_sim_ceiling');
@@ -501,4 +704,62 @@ test('config rejects weak or missing settings and normalises origins', () => {
   const rolling = loadConfig({ ...TEST_ENV, WIN_SIG_SALT: 'old-salt, new-salt' });
   assert.deepEqual(rolling.winSigSalts, ['old-salt', 'new-salt']);
   assert.equal(loadConfig({ ...TEST_ENV, WIN_SIG_STRICT: 'false' }).winSigStrict, false);
+});
+
+test('config refuses values that would silently weaken anti-cheat or redirect trust', () => {
+  const invalid = [
+    [{ PORT: '3000junk' }, /Invalid PORT/],
+    [{ PORT: '0' }, /Invalid PORT/],
+    [{ PORT: '65536' }, /Invalid PORT/],
+    [{ FLOOR_PRACTICE_MS: '699' }, /Invalid FLOOR_PRACTICE_MS/],
+    [{ FLOOR_SIM_MS: '699' }, /Invalid FLOOR_SIM_MS/],
+    [{ FLOOR_SIM_MS: '61001' }, /Invalid FLOOR_SIM_MS/],
+    [{ SESSION_TTL_MS: '0' }, /Invalid SESSION_TTL_MS/],
+    [{ OAUTH_STATE_TTL_MS: '0' }, /Invalid OAUTH_STATE_TTL_MS/],
+    [{ OAUTH_STATE_TTL_MS: '900001' }, /Invalid OAUTH_STATE_TTL_MS/],
+    [{ WIN_SIG_STRICT: 'flase' }, /Invalid WIN_SIG_STRICT/],
+    [{ WIN_SIG_SALT: ', ,' }, /WIN_SIG_SALT/],
+    [{ GAME_ORIGIN: 'javascript:alert(1)' }, /Invalid GAME_ORIGIN/],
+    [{ GAME_ORIGIN: 'http://example.test' }, /Invalid GAME_ORIGIN/],
+    [{ GAME_ORIGIN: 'https://themizeguy.github.io/not-an-origin' }, /Invalid GAME_ORIGIN/],
+    [{ BASE_URL: 'http://api.example.test' }, /Invalid BASE_URL/],
+    [{ BASE_URL: 'https://user:password@api.example.test' }, /Invalid BASE_URL/],
+    [{ BASE_URL: 'https://api.example.test/prefix' }, /Invalid BASE_URL/],
+    [{ GAME_RETURN_PATH: '//attacker.example/callback' }, /Invalid GAME_RETURN_PATH/],
+    [{ TWITCH_CLIENT_ID: '   ' }, /Missing required environment variables/],
+  ];
+
+  for (const [overrides, expected] of invalid) {
+    assert.throws(() => loadConfig({ ...TEST_ENV, ...overrides }), expected);
+  }
+
+  const config = loadConfig({
+    ...TEST_ENV,
+    PORT: '65535',
+    FLOOR_PRACTICE_MS: '9000',
+    FLOOR_SIM_MS: '16000',
+    SESSION_TTL_MS: '60000',
+    OAUTH_STATE_TTL_MS: '60000',
+    WIN_SIG_STRICT: 'YES',
+    WIN_SIG_SALT: ' current , current , previous ',
+  });
+  assert.equal(config.port, 65535);
+  assert.deepEqual(config.floors, { practice: 9000, simulation: 16000 });
+  assert.equal(config.winSigStrict, true);
+  assert.deepEqual(config.winSigSalts, ['current', 'previous']);
+
+  const engineFloors = loadConfig({
+    ...TEST_ENV,
+    FLOOR_PRACTICE_MS: '700',
+    FLOOR_SIM_MS: '700',
+  });
+  assert.deepEqual(engineFloors.floors, { practice: 700, simulation: 700 });
+
+  const localDevelopment = loadConfig({
+    ...TEST_ENV,
+    GAME_ORIGIN: 'http://localhost:8080',
+    BASE_URL: 'http://127.0.0.1:3000',
+  });
+  assert.equal(localDevelopment.gameOrigin, 'http://localhost:8080');
+  assert.equal(localDevelopment.baseUrl, 'http://127.0.0.1:3000');
 });

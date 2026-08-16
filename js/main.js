@@ -33,8 +33,10 @@
 
   var SIMULATION = {
     imageSrc: './assets/simulation.png',
-    imageW: 312,
-    imageH: 128,
+    // Preserve the source's 312:128 aspect ratio while making the complete
+    // 128px-wide Win95 window slightly narrower than Practice's 136px.
+    imageW: 120,
+    imageH: 49,
     bestKey: 'emoney-aimlabs-best-sim'
   };
 
@@ -138,10 +140,22 @@
   var apiUp = true;                // flips false the first time a call comes back empty
   var runId = null;                // the server's id for the run in progress
   var runGen = 0;                  // guards a late boot-me() from opening a stale run
+  var runOpenTail = Promise.resolve(); // preserves server ordering across replaced attempts
+  var activeRunOpenGen = 0;        // lets a clean fast win wait for its own POST
+  var activeRunOpenPromise = null;
   var bootMe = null;               // resolves once the boot identity call has settled
   var runNonce = '';               // V3.4 run nonce, presented on every beat
   var runChain = '';               // V3.4 newest chain token the server handed back
   var beatTimer = 0;
+  var beatRequestSeq = 0;          // identifies the one request allowed to own the chain
+  var activeBeatSeq = 0;
+  var beatInFlightRun = null;
+  var beatInFlightPromise = null;
+  var beatPending = false;         // only a phase transition is urgent enough to queue
+  var challengePromise = Promise.resolve(null); // orders start -> solve for one run
+  var challengeVerified = false;   // only a server `{solved:true}` qualifies a ranked run
+  var challengeUnranked = false;   // keeps signed-out/offline local play usable
+  var runOpenedWall = 0;           // client-side guard for the server's Practice offset
   var inChase = false;             // V3.3: beats carry this once the chase is live
   var BEAT_MS = 5000;
   /* V3.6: practice runs still record and still travel the activity feed;
@@ -327,6 +341,64 @@
     return (typeof v === 'number' && isFinite(v)) ? String(v) : '-';
   }
 
+  function resetBeatFlow() {
+    // The request itself cannot be cancelled, but its sequence no longer owns
+    // any state. A late completion therefore cannot clear or advance a new run.
+    activeBeatSeq = 0;
+    beatInFlightRun = null;
+    beatInFlightPromise = null;
+    beatPending = false;
+  }
+
+  /* The canvas challenge is visible client-side, but its eligibility state is
+     timed by the server. Requests stay ordered even if the player solves while
+     the run-open POST is still landing. `ready` is local-only: Simulation uses
+     it to start the scored Chase after the pre-Chase puzzle has closed. */
+  function reportChallenge(stage, detail) {
+    var gen = runGen;
+    if (stage === 'ready') {
+      return Promise.resolve(challengePromise).then(function () {
+        if (
+          gen === runGen
+          && running === 'simulation'
+          && (challengeVerified || challengeUnranked)
+        ) return markChaseStarted();
+        return null;
+      });
+    }
+    if (stage !== 'start' && stage !== 'solve') return Promise.resolve(null);
+    var opening = (!runId && activeRunOpenGen === gen && activeRunOpenPromise)
+      ? activeRunOpenPromise : Promise.resolve(null);
+    challengePromise = Promise.resolve(challengePromise).then(function () {
+      return opening;
+    }).then(function () {
+      if (gen !== runGen) return null;
+      if (!NET || !user || !runId) {
+        challengeUnranked = true;
+        return { unranked: true };
+      }
+      var delayMs = 0;
+      if (stage === 'start' && running === 'practice' && runOpenedWall) {
+        delayMs = Math.max(0, 500 - (Date.now() - runOpenedWall));
+      }
+      return new Promise(function (resolve) {
+        if (delayMs > 0) window.setTimeout(resolve, delayMs);
+        else resolve();
+      }).then(function () {
+        if (gen !== runGen || !runId) return null;
+        return NET.event('challenge_' + stage, '', runId, detail || {});
+      });
+    }, function () { return null; }).then(function (result) {
+      if (stage === 'start' && !result) {
+        challengeUnranked = true;
+        return { unranked: true };
+      }
+      if (stage === 'solve') challengeVerified = !!(result && result.solved === true);
+      return result;
+    });
+    return challengePromise;
+  }
+
   /* V3.5. The chase engine ended the run on a ban screen. This is cosmetic --
      it names the reason on the feed and in the player's history and can never
      move a score -- so it is fire-and-forget, and seam runs never report. */
@@ -336,12 +408,21 @@
        seconds, indefinitely, polluting the very audit trail the rejections table
        exists to keep clean. The run is over here too. */
     stopBeats();
+    resetBeatFlow();
+    var bannedRun = runId;
     runGen++;                       // nothing in flight may reopen this run
     runId = null;
     runNonce = '';
     runChain = '';
-    if (isSeam || !NET || !user) return;
-    NET.event('ban', reason);
+    runOpenedWall = 0;
+    challengeVerified = false;
+    challengeUnranked = false;
+    // A server retry delay is not a failed verification and is not one of the
+    // public run-failure reasons. The next run replacement closes this attempt
+    // normally; do not mislabel the player for merely retrying too quickly.
+    if (reason === 'challenge-retry') return;
+    if (isSeam || !NET || !user || !bannedRun) return;
+    NET.event('ban', reason, bannedRun);
   }
 
   /* run lifecycle. Seam runs never touch the API at all. */
@@ -353,7 +434,12 @@
     runNonce = '';
     runChain = '';
     inChase = false;
+    challengePromise = Promise.resolve(null);
+    challengeVerified = false;
+    challengeUnranked = false;
+    runOpenedWall = 0;
     stopBeats();
+    resetBeatFlow();
     if (!NET || isSeam) return;
 
     /* The mode buttons are the first thing a returning player clicks, and on a
@@ -370,19 +456,36 @@
   function openRun(mode, gen) {
     if (!NET || isSeam || !user) return;      // genuinely signed out: nothing to open
     if (gen !== runGen) return;               // that run was abandoned while we waited
-    NET.startRun(mode).then(function (r) {
+    var opened = runOpenTail.then(function () {
+      // A newer attempt may have replaced this one while it waited behind an
+      // older POST. In that case there is no reason to open it at all.
+      if (!NET || isSeam || !user || gen !== runGen) return null;
+      return NET.startRun(mode);
+    });
+    var handled = opened.then(function (r) {
+      if (gen !== runGen) return;             // it ended while the POST itself was in flight
       if (!r) { apiUp = false; paintAccount(); return; }
       runId = r.runId;
       runNonce = r.nonce;
       runChain = r.chain;              // V3.4 genesis token
+      runOpenedWall = Date.now();
       startBeats();
-      /* The chase can begin before this POST resolves -- flappy being
-         unavailable sends us straight through, and a fast gauntlet could too.
-         In that case the phase flag is already set and the stamping beat has to
-         go out here instead, or the server would not see chase:true until the
-         next five-second tick. */
-      if (inChase) sendBeat();
+    }, function () {
+      // net.js promises never reject, but a replacement client must not leave
+      // an unhandled rejection or permanently wedge the open queue.
+      if (gen === runGen) { apiUp = false; paintAccount(); }
     });
+    activeRunOpenGen = gen;
+    activeRunOpenPromise = handled;
+    handled.then(function () {
+      if (activeRunOpenGen === gen && activeRunOpenPromise === handled) {
+        activeRunOpenGen = 0;
+        activeRunOpenPromise = null;
+      }
+    });
+    // Keep the queue usable even if a replacement network client rejects in
+    // violation of net.js's always-resolve contract.
+    runOpenTail = handled.then(function () { return null; }, function () { return null; });
   }
 
   /* The chase segment has begun: the server stamps the phase transition off the
@@ -390,28 +493,61 @@
      waiting up to five seconds for the next tick. */
   function markChaseStarted() {
     inChase = true;
-    sendBeat();
+    return sendBeat(true);
   }
 
   /* V3.4. One beat, carrying the run nonce and the newest chain token. The
      reply advances the token; a beat that does not land leaves the one we hold
      in place, so the next beat simply re-presents it and the server closes the
      gap on its side. Nothing here blocks or throws. */
-  function sendBeat() {
-    if (!NET || !runId) return;
+  function sendBeat(urgent) {
+    if (!NET || !runId) return Promise.resolve(null);
     var forRun = runId;
-    NET.beat(runId, runNonce, runChain, inChase).then(function (next) {
+    if (activeBeatSeq && beatInFlightRun === forRun) {
+      // Interval ticks are disposable. A phase transition is not: send it as
+      // soon as the request that currently owns the chain returns.
+      if (urgent) beatPending = true;
+      return beatInFlightPromise || Promise.resolve(null);
+    }
+
+    var seq = ++beatRequestSeq;
+    activeBeatSeq = seq;
+    beatInFlightRun = forRun;
+    var request;
+    try {
+      request = NET.beat(forRun, runNonce, runChain, inChase);
+    } catch (e) {
+      request = Promise.resolve(null);
+    }
+
+    beatInFlightPromise = Promise.resolve(request).then(function (next) {
       // a late reply must not overwrite the token of a run that already ended
-      if (next && runId === forRun) runChain = next;
+      if (next && runId === forRun && activeBeatSeq === seq) runChain = next;
+    }, function () {
+      // net.js promises never reject, but a replacement client must not wedge
+      // the chain forever if it violates that contract.
+    }).then(function () {
+      if (activeBeatSeq !== seq) return null;
+      activeBeatSeq = 0;
+      beatInFlightRun = null;
+      beatInFlightPromise = null;
+      var follow = beatPending && runId === forRun;
+      beatPending = false;
+      return follow ? sendBeat(false) : null;
     });
+    return beatInFlightPromise;
   }
 
   // The heartbeat is what makes a forged time expensive: it has to be held for
-  // the whole claimed duration. It keeps running through captchas, because the
-  // run timer does too.
+  // the whole server-observed scored duration. Practice's server-timestamped
+  // puzzle interval is excluded from that window; extra beats during it are
+  // harmless and never reduce the later requirement.
   function startBeats() {
     stopBeats();
     beatTimer = window.setInterval(sendBeat, BEAT_MS);
+    // Witness the run immediately. Besides adding honest-client slack, this is
+    // the first phase-specific beat for a Simulation gauntlet.
+    sendBeat(false);
   }
 
   function stopBeats() {
@@ -420,16 +556,13 @@
 
   function finishRun(stats) {
     stopBeats();
-    if (!chase || !chase.winExtras) return;
-    if (isSeam) return;                      // seam runs are never submitted
-    if (!NET) return;
+    if (!chase || !chase.winExtras) { runGen++; return; }
+    if (isSeam) { runGen++; return; }         // seam runs are never submitted
+    if (!NET) { runGen++; return; }
 
     if (!user) {
+      runGen++;
       chase.winExtras({ note: 'Sign in with Twitch to post your score.' });
-      return;
-    }
-    if (!runId) {
-      chase.winExtras({ note: 'Score not recorded: no server run for this attempt.' });
       return;
     }
 
@@ -444,38 +577,73 @@
        but the client should never have asked. All three fields ride on the same
        payload, so all three are checked. */
     if (stats.sus > 0 || stats.cheated || !stats.sig) {
+      runGen++;                       // a pending open response is no longer this run
       runId = null;
       runNonce = '';
       runChain = '';
+      resetBeatFlow();
       LOG('[AIMLAB] SCORE WITHHELD sus=' + stats.sus +
           ' cheated=' + (stats.cheated ? 1 : 0) + ' sig=' + (stats.sig ? 1 : 0));
       return;                       // the engine's own dialog is the notice
     }
 
-    var id = runId;
-    runId = null;
-    runNonce = '';
-    runChain = '';
-    NET.submitScore(id, stats.timeMs, stats.misses, stats.nearMisses,
-                    stats.sus, stats.sig).then(function (r) {
-      if (!r) {
-        chase.winExtras({ note: 'Score could not be recorded. The leaderboard is offline.' });
+    // A fast Practice win can beat a cold /run response. A clean finish waits
+    // for its own generation instead of discarding a valid server run; a ban,
+    // exit, retry, or newer attempt increments runGen and wins the race.
+    var finishGen = runGen;
+    var opening = (!runId && activeRunOpenGen === finishGen && activeRunOpenPromise)
+      ? activeRunOpenPromise : Promise.resolve(null);
+    opening.then(function () {
+      if (runGen !== finishGen) return;
+      stopBeats(); // openRun may have armed the interval while this win waited
+      if (!user) {
+        runGen++;
+        chase.winExtras({ note: 'Sign in with Twitch to post your score.' });
         return;
       }
-      if (r.refused) {
-        /* The server refused it and said why; passing that on beats inventing an
-           outage. The code rides along in brackets so a refusal can be reported
-           and looked up exactly, rather than paraphrased from memory. */
-        var why = r.message || 'Score not accepted by the server.';
-        if (r.error) why += '   [' + r.error + ']';
-        chase.winExtras({ note: why });
+      if (!runId) {
+        runGen++;
+        chase.winExtras({ note: 'Score not recorded: no server run for this attempt.' });
         return;
       }
-      var note = (r.improved ? 'New record.   ' : '') + 'Rank #' + r.rank;
-      if (typeof r.bestMs === 'number') note += '   best ' + fmtMs(r.bestMs);
-      chase.winExtras({
-        note: note,
-        onBoard: function () { openModal(); }
+
+      var id = runId;
+      var submitGen = ++runGen;                 // no later completion may revive it
+      var settled = Promise.all([
+        (beatInFlightRun === id && beatInFlightPromise)
+          ? beatInFlightPromise : Promise.resolve(null),
+        challengePromise || Promise.resolve(null)
+      ]);
+      settled.then(function () {
+        // A ban, exit, retry or newer run won the lifecycle while the final beat
+        // was landing. It must also win over this stale submission.
+        if (runId !== id || runGen !== submitGen) return;
+        runId = null;
+        runNonce = '';
+        runChain = '';
+        resetBeatFlow();
+        NET.submitScore(id, stats.timeMs, stats.misses, stats.nearMisses,
+                        stats.sus, stats.sig).then(function (r) {
+          if (!r) {
+            chase.winExtras({ note: 'Score could not be recorded. The leaderboard is offline.' });
+            return;
+          }
+          if (r.refused) {
+            /* The server refused it and said why; passing that on beats inventing an
+               outage. The code rides along in brackets so a refusal can be reported
+               and looked up exactly, rather than paraphrased from memory. */
+            var why = r.message || 'Score not accepted by the server.';
+            if (r.error) why += '   [' + r.error + ']';
+            chase.winExtras({ note: why });
+            return;
+          }
+          var note = (r.improved ? 'New record.   ' : '') + 'Rank #' + r.rank;
+          if (typeof r.bestMs === 'number') note += '   best ' + fmtMs(r.bestMs);
+          chase.winExtras({
+            note: note,
+            onBoard: function () { openModal(); }
+          });
+        });
       });
     });
   }
@@ -504,6 +672,12 @@
   }
 
   function failToMenu() {
+    stopBeats();
+    resetBeatFlow();
+    runGen++;
+    runId = null;
+    runNonce = '';
+    runChain = '';
     running = null;
     startScreen.classList.remove('hide');
   }
@@ -531,7 +705,9 @@
                                          misses: st.misses, nearMisses: st.nearMisses,
                                          sus: st.sus, sig: st.sig,
                                          cheated: st.cheated }); },
+      onChallenge: reportChallenge,
       onBan: reportBan,
+      onExit: function (action) { onChaseExit(action, 'practice'); },
       // V2.8: practice is silent. No loop, no error chord, no AudioContext -- the
       // engine never builds one, so there is nothing here to autoplay-gate.
       audio: null
@@ -576,7 +752,6 @@
   }
 
   function startSimChase(info) {
-    markChaseStarted();              // V3.3: the run was opened at flappy start
     chase = startChase({
       imageSrc: SIMULATION.imageSrc,
       imageW: SIMULATION.imageW,
@@ -588,8 +763,12 @@
                                          misses: st.misses, nearMisses: st.nearMisses,
                                          sus: st.sus, sig: st.sig,
                                          cheated: st.cheated }); },
+      // The visual challenge runs after Flappy and before startTimer(), so its
+      // solve time never contaminates the Chase leaderboard time.
+      challengeBeforeStart: true,
+      onChallenge: reportChallenge,
       // V2.14: the ban screen's two buttons come back through here
-      onExit: onChaseExit,
+      onExit: function (action) { onChaseExit(action, 'simulation'); },
       onBan: reportBan,
       susSeed: (info && info.sus > 0) ? info.sus : 0,
       stateCheat: !!(info && info.stateCheat),
@@ -599,12 +778,12 @@
     });
   }
 
-  /* V2.14. A captcha ban ends the run; the player picks where to go next.
-     Retry restarts SIMULATION from the flappy gauntlet as a completely fresh
-     run, Home returns to the start screen. Either way the chase is torn down
-     first, which stops its audio and unbinds everything it owns. */
-  function onChaseExit(action) {
+  /* A failed run lets the player retry the same mode or return home. Either
+     path tears the old engine down before opening a fresh server run. */
+  function onChaseExit(action, mode) {
     stopBeats();
+    resetBeatFlow();
+    runGen++;
     runId = null;
     runNonce = '';
     runChain = '';
@@ -614,8 +793,11 @@
     running = null;
 
     if (action === 'retry') {
-      skipFlappy = false;             // a retry always starts at the gauntlet
-      startSimulation(true);          // the ban button click is the gesture
+      if (mode === 'practice') startPractice();
+      else {
+        skipFlappy = false;           // a Simulation retry starts at the gauntlet
+        startSimulation(true);        // the button click is the audio gesture
+      }
       return;
     }
     startScreen.classList.remove('hide');
@@ -634,7 +816,8 @@
     fallback: ['fi-i', 'i'],
     run_won: ['fi-win', '*'],
     run_failed: ['fi-e', 'x'],
-    flappy_death: ['fi-w', '!']
+    flappy_death: ['fi-w', '!'],
+    cheat_detected: ['fi-e', '!']
   };
 
   function secs(ms) {
@@ -650,8 +833,9 @@
     if (d.phase !== 'chase') {
       return abandoned ? 'gave up in the bird gauntlet' : 'failed on flappy bird';
     }
-    if (d.reason === 'captcha-fail') return 'failed the popup chase (INDEFINITE BAN: wrong piece)';
-    if (d.reason === 'captcha-timeout') return 'failed the popup chase (INDEFINITE BAN: verification timeout)';
+    if (d.reason === 'captcha-fail') return 'failed the popup chase (wrong piece)';
+    if (d.reason === 'captcha-timeout') return 'failed the popup chase (verification timeout)';
+    if (d.reason === 'clock-forgery') return 'was removed for a forged popup-chase clock';
     if (d.reason === 'timeout') return 'ran out of time on the popup chase';
     return 'gave up on the popup chase';
   }
@@ -663,6 +847,9 @@
       return t;
     }
     if (type === 'run_failed') return failWords(d);
+    if (type === 'cheat_detected') {
+      return 'was caught cheating' + (d.reason ? ' (' + d.reason + ')' : '');
+    }
     return 'failed on flappy bird';
   }
 
@@ -793,6 +980,7 @@
   var REASON_WORDS = {
     'captcha-fail': 'wrong piece',
     'captcha-timeout': 'verification timeout',
+    'clock-forgery': 'forged clock',
     'timeout': 'out of time'
   };
 

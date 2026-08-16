@@ -3,6 +3,7 @@
 .anti-slop/
 .DS_Store
 .playwright-mcp/
+.serena/
 /*.png
 .env
 .env.*
