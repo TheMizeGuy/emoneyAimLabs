@@ -13,7 +13,8 @@ const { createFeed } = require('../feed');
 const { createApp } = require('../app');
 const { loadConfig } = require('../config');
 const { signSession } = require('../session');
-const { winSignatures } = require('../validation');
+const { LIMITS, winSignatures } = require('../validation');
+const { expectedAnswers } = require('../challenge');
 
 const TEST_ENV = Object.freeze({
   DATABASE_URL: 'postgresql://unused:unused@127.0.0.1:5432/unused',
@@ -63,7 +64,8 @@ function signClaim(claim, salt) {
 async function createContext(options = {}) {
   const config = testConfig(options.env);
   const pool = await createMemPool();
-  const store = createStore(pool);
+  const baseStore = createStore(pool);
+  const store = options.decorateStore ? options.decorateStore(baseStore) : baseStore;
   const clock = createClock();
   const limiter = createRateLimiter({ now: () => clock.nowMs() });
   const logs = [];
@@ -201,6 +203,33 @@ async function sendBeat(client, runId, chainToken, chase) {
   return { response, chain: next };
 }
 
+async function solveChallenge(ctx, client, runId) {
+  const before = await ctx.store.getRun(runId);
+  if (
+    before
+    && before.mode === 'practice'
+    && ctx.clock.nowMs() - before.chaseStartedAtMs < LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS
+  ) {
+    ctx.clock.advance(
+      LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS
+      - (ctx.clock.nowMs() - before.chaseStartedAtMs),
+    );
+  }
+  const started = await client.post('/api/event', { type: 'challenge_start', runId });
+  if (started.status !== 200) return { started, solved: null };
+  const run = await ctx.store.getRun(runId);
+  const answers = expectedAnswers({
+    runId,
+    seed: run.challengeSeed,
+    secret: ctx.config.sessionSecret,
+  });
+  ctx.clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS);
+  const solved = await client.post('/api/event', {
+    type: 'challenge_solve', runId, answers,
+  });
+  return { started, solved };
+}
+
 // Plays a legitimate run end to end: opens it, walks the gauntlet when the mode
 // has one, stamps the chase, heartbeats on the real cadence while advancing the
 // clock, then submits a properly signed score.
@@ -221,6 +250,10 @@ async function playRun(ctx, client, mode, timeMs, stats = {}) {
     ctx.clock.advance(Math.max(0, flappyMs - flappyBeats * 5000));
   }
 
+  // Simulation places this between Flappy and Chase; Practice has no separate
+  // pre-Chase phase, so the same helper completes it before the first beat.
+  await solveChallenge(ctx, client, runId);
+
   // The first beat that declares the chase stamps the phase boundary.
   ({ chain: chainToken } = await sendBeat(client, runId, chainToken, true));
 
@@ -239,6 +272,7 @@ async function playRun(ctx, client, mode, timeMs, stats = {}) {
     sus: stats.sus === undefined ? 0 : stats.sus,
   };
   claim.sig = stats.sig === undefined ? signClaim(claim) : stats.sig;
+  if (stats.beforeSubmit) await stats.beforeSubmit({ claim, runId, chain: chainToken });
   const submitted = await client.post('/api/score', claim);
   return { runId, chain: chainToken, created, submitted, claim };
 }
@@ -250,6 +284,7 @@ module.exports = {
   createClock,
   createContext,
   playRun,
+  solveChallenge,
   sendBeat,
   signClaim,
 };

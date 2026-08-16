@@ -101,6 +101,10 @@
     ? W.crypto.subtle.digest.bind(W.crypto.subtle)
     : null;
   var TENC = W.TextEncoder || null;
+  var RANDOM_VALUES = (W.crypto && W.crypto.getRandomValues)
+    ? W.crypto.getRandomValues.bind(W.crypto)
+    : null;
+  var IMAGE = W.Image || null;
 
   // Every geometry read in the engine goes through here, never through the
   // element's own (patchable) method.
@@ -193,9 +197,9 @@
     '<div class="ovcard">',
     '<div class="ovbar"><span class="ovbartitle">eMoney Security Center</span></div>',
     '<div class="ovbody">',
-    '<p class="captext">Prove you are not a robot.<br>Drag the piece into the gap.</p>',
+    '<p class="captext" data-el="capText">Loading visual verification...</p>',
     '<div class="capscene" data-el="capScene">',
-    '<canvas class="capshot" data-el="capCanvas" width="260" height="150"></canvas>',
+    '<canvas class="capshot" data-el="capCanvas" width="260" height="140"></canvas>',
     '<canvas class="cappiece" data-el="capPiece" width="46" height="46"></canvas>',
     '</div>',
     '<div class="capbar">',
@@ -209,7 +213,7 @@
     '<div class="banbox hide" data-el="banBox">',
     '<div class="baninner">',
     '<div class="banmark" aria-hidden="true"><span class="banmarktail"></span></div>',
-    '<p class="bantitle">INDEFINITE BAN</p>',
+    '<p class="bantitle" data-el="banTitle">RUN FAILED</p>',
     '<p class="bansub" data-el="banSub">Verification failed.</p>',
     '<div class="banbtns">',
     '<button class="banbtn" data-el="banRetry" type="button">Retry</button>',
@@ -226,7 +230,7 @@
     '<p class="errtext"><span data-el="pauseL1">This window is too small to run away in.</span><br>',
     '<span data-el="pauseL2">Make the browser bigger to carry on.</span></p>',
     '</div>',
-    '<p class="errsub" data-el="pauseSub">Paused. The clock is not running.</p>',
+    '<p class="errsub" data-el="pauseSub">Paused. The clock is STILL RUNNING.</p>',
     '</div>',
     '</div>',
     '</div>'
@@ -313,22 +317,22 @@
     var SHOCK_IMPULSE   = 1600;  // px/s added at zero distance, scaled by (1 - d/range)^2 (v2 1250)
     var SHOCK_BURST_MS  = 600;   // brief burst that stacks with the taunt burst
 
-    /* V2.12 -- the captcha interrupt. Simulation only, once per run. */
-    /* V2.17: recurring. The first captcha lands in this window after the chase
-       starts, and every solve schedules the next one the same way, for the whole
-       simulation chase. */
-    var CAPTCHA_MIN_MS  = 10000;  // earliest the timer path can fire
-    var CAPTCHA_MAX_MS  = 18000;  // latest
+    /* V3.10 -- one visual challenge per run. Simulation puts it between the
+       gauntlet and the scored Chase. Practice has no preceding phase, so its
+       challenge arrives at an unpredictable point near the start instead. */
+    var CAPTCHA_MIN_MS  = 500;
+    var CAPTCHA_MAX_MS  = 1800;
     var CAPTCHA_MISS_MIN = 15;    // or this many misses, rolled per run...
     var CAPTCHA_MISS_MAX = 30;    // ...uniform in [MIN, MAX], whichever comes first
-    var CAPTCHA_TOL     = 6;      // px the piece must land within
+    var CAPTCHA_TOL     = 12;     // forgiving snap radius; candidates are widely separated
     var CAPTCHA_BEAT_MS = 450;    // success beat before the dialog closes
     var CAPTCHA_LIMIT_MS = 60000; // V2.14: the countdown, and one drop only
-    var CAP_W = 260, CAP_H = 150, CAP_PIECE = 46;
+    var CAPTCHA_ROUNDS = 4;
+    var CAP_W = 260, CAP_H = 140, CAP_PIECE = 46;
 
-    /* V2.19 -- the simulation shot clock. Sixty seconds of run time to close the
-       window, and the run timer keeps counting through every captcha, so the
-       captchas eat the clock. Practice has neither clock nor ban. */
+    /* V2.19 -- the simulation shot clock. Sixty seconds of scored Chase time to
+       close the window. Simulation completes verification before Chase starts;
+       Practice has neither a shot clock nor a timeout ban. */
     var SHOT_CLOCK_MS = 60000;
     var SHOT_LOW_MS   = 10000;   // the readout reddens here
 
@@ -390,8 +394,9 @@
     // now MAX_SUBSTEPS * FIXED_DT_MS and there is nothing left to clamp.)
     var NEAR_RADIUS        = 48;     // px from the close button's center
     var NEAR_DEBOUNCE      = 250;    // ms
-    var EDGE_PAD           = 10;     // keeps a margin between the window and the screen edge
-    var PLAY_MARGIN        = 200;    // room the card needs beyond its own size, or the run pauses
+    var EDGE_PAD           = 10;     // keeps a margin between the window and the field edge
+    var PLAYFIELD_W        = 1120;   // one ranked field size, independent of browser dimensions
+    var PLAYFIELD_H        = 620;
     var LATCH_MAX_MS       = 600;    // failsafe so a lost pointerup cannot freeze the card forever
     var BEST_KEY           = (typeof opts.bestKey === 'string' && opts.bestKey) ? opts.bestKey : DEFAULT_BEST_KEY;
     // Which mode the HUD announces. Static per run, so it is re-derived from
@@ -451,6 +456,16 @@
     var PRESENCE_PX   = 150;   // ...and this close to the press point
     var PRESENCE_SNAP = 2;     // or the press must land on the pointer's own last position
     var PRESENCE_SWALLOW_MS = 400;  // how long a blocked press suppresses its own click
+    /* V3.10. `isTrusted` does not mean human: CDP and Playwright both drive the
+       native input path. A winning press therefore needs evidence from THIS
+       approach, including a pointer sample in the outer aiming band and enough
+       real rendered time to cross it. A locator bot that teleports directly to
+       the live button centre never produces that middle-band observation. */
+    var AIM_RADIUS     = 260;
+    var AIM_CLOSE_PX   = 44;
+    var AIM_MIN_MS     = 96;
+    var AIM_MAX_MS     = 1400;
+    var AIM_MIN_FRAMES = 4;
 
     /* V2.7 layer D -- geometry attestation. */
     var ATTEST_FRAMES = 30;    // roughly twice a second
@@ -593,10 +608,12 @@
     var capScene  = el('capScene');
     var capCanvas = el('capCanvas');
     var capPiece  = el('capPiece');
+    var capText   = el('capText');
     var capClock  = el('capClock');
     var shotRow   = el('shotRow');
     var elShot    = el('shotClock');   // NOT 'shot': that data-el names the card's image holder
     var banBox    = el('banBox');
+    var banTitle  = el('banTitle');
     var banSub    = el('banSub');
     var banRetry  = el('banRetry');
     var banHome   = el('banHome');
@@ -674,14 +691,18 @@
     var campX = 0, campY = 0, campAt = -1e9, cursorParked = false;
 
     /* V2.12 captcha, all closure-local per V2.6 layer 1. */
-    var CAPTCHA_ON = (MODE_LABEL === 'SIMULATION');
+    var CAPTCHA_ON = true;
+    var PRESTART_CHALLENGE = (opts.challengeBeforeStart === true);
+    var CAPTCHA_TIMED = !PRESTART_CHALLENGE;
     var SHOT_CLOCK_ON = (MODE_LABEL === 'SIMULATION');
     var shotLeftShown = -1;
     var capBroken = false, capShown = false, capAt = Infinity, capShownAt = 0, capBeatT = 0;
-    var capCycle = 0;
+    var capShownWall = 0, capShownWall2 = 0;
+    var capCycle = 0, capSolvedCount = 0;
     var capMissTarget = 0, capUsed = false, banned = false, capLeftShown = -1;
-    var capTX = 0, capTY = 0, capHX = 0, capHY = 0, capPX = 0, capPY = 0;
-    var capDrag = false, capDX = 0, capDY = 0, capL = 0, capT = 0;
+    var capHX = 0, capHY = 0, capPX = 0, capPY = 0;
+    var capPayload = null, capRound = 0, capAnswers = [], capHoles = [], capLoadGen = 0;
+    var capArmed = false, capDrag = false, capDX = 0, capDY = 0, capL = 0, capT = 0;
     /* Where the pointer is while the playfield is shielded. Deliberately
        separate from moveT/moveX/moveY: the physics may know where the cursor is,
        but a drag inside the dialog must never count as presence evidence for a
@@ -743,16 +764,11 @@
     var drawnX = 0, drawnY = 0, drawOffX = 0, drawOffY = 0;
 
     // ruling 3: too small a viewport pauses the run behind a dialog
-    var paused = false, pauseAt = 0, pauseWall = 0, pauseWall2 = 0;
+    var paused = false;
     /* Two independent reasons to hold the run. Kept apart so that resizing the
        window while it is unfocused cannot resume a run nobody is looking at,
        and vice versa: the field is live only when BOTH are clear. */
     var pauseSmall = false, pauseUnfocused = false;
-    /* Whether the pause being served included a focus loss. A too-small window
-       is a state the player cannot play in, so its clock stops and the time is
-       given back; walking away from the window is a choice, so its clock keeps
-       running. Sticky for the whole pause: once you left, you left. */
-    var pauseWasUnfocused = false;
     // When the playfield last became live. The arming gate reads it (V3.9).
     var armAt = -1e9, armFrame = -1e9;
     // Trusted press timestamps inside CLICK_WINDOW_MS, for the spam gate (V3.9).
@@ -782,6 +798,7 @@
 
     // V2.7 layer B: the last trusted mouse position, and the press that failed the gate
     var moveT = -1e9, moveX = 0, moveY = 0, presenceBlockAt = -1e9;
+    var aimAt = -1e9, aimFrame = -1e9;
     var presenceSus = 0;
 
     // V2.7 layer D: how many frames until the next attestation
@@ -803,8 +820,20 @@
 
     /* ---------------- helpers ---------------- */
 
-    // xorshift32: a stable pseudo-random source for dodge signs and bounce jitter
-    var seed = (WALL() ^ 0x9e3779b9) >>> 0;
+    function strongSeed() {
+      if (RANDOM_VALUES && W.Uint32Array) {
+        try {
+          var words = new W.Uint32Array(1);
+          RANDOM_VALUES(words);
+          if (words[0] !== 0) return words[0] >>> 0;
+        } catch (e) { /* fall through to the mixed-clock fallback */ }
+      }
+      return (WALL() ^ Math.floor(NOW() * 1000) ^ 0x9e3779b9) >>> 0;
+    }
+
+    // Physics is deterministic inside a frame sequence, while every run and
+    // every visual puzzle begin from fresh cryptographic entropy where offered.
+    var seed = strongSeed();
     function rnd() {
       seed ^= seed << 13; seed >>>= 0;
       seed ^= seed >>> 17;
@@ -970,6 +999,7 @@
     function startTimer() {
       if (started || won) return;
       started = true;
+      if (PRESTART_CHALLENGE) randomizeSpawn();
       // V3.9: the run begins armed-but-not-yet-winnable, and the card takes its
       // clearance from wherever the cursor that pressed the mode button is.
       arm();
@@ -977,7 +1007,8 @@
       startWall = WALL();
       startWall2 = wall2();
       simT = NOW();
-      // V2.12: one captcha per run, at a random instant in [5, 30] s
+      // Practice gets one challenge 0.5-1.8 s into Chase. Simulation has already
+      // completed its challenge before this timer starts.
       scheduleCaptcha(NOW());
       LOG('[AIMLAB] START');
     }
@@ -1403,125 +1434,90 @@
       showTaunt(TAUNT_GEOM);
     }
 
-    /* ---------------- V2.12: the captcha interrupt ----------------
-       Simulation only, once per run, on whichever comes first: a random instant
-       in [5, 30] s, or the fifteenth miss. While it is up the playfield is
-       shielded -- no pointer reaches the game, the X is inert and the card
-       wanders as though the cursor had left the window -- but the run timer
-       deliberately keeps going. Every pixel of it is drawn here; nothing is
-       fetched and no real security product is named or imitated.
-
-       The jigsaw outline: a square with a tab on the right edge and a matching
-       notch on the left, so the piece reads as a puzzle piece at 46 px. */
-    function capPath(c, ox, oy, sz) {
-      var t = sz * 0.22;                       // tab radius
-      var m = sz * 0.5;
-      c.beginPath();
-      c.moveTo(ox, oy);
-      c.lineTo(ox + sz, oy);
-      c.lineTo(ox + sz, oy + m - t);
-      c.arc(ox + sz, oy + m, t, -Math.PI / 2, Math.PI / 2, false);   // tab, bulging right
-      c.lineTo(ox + sz, oy + sz);
-      c.lineTo(ox, oy + sz);
-      c.lineTo(ox, oy + m + t);
-      // anticlockwise, so this bites INTO the piece instead of bulging out past
-      // its left edge -- where it was being clipped off the 46px piece canvas
-      // entirely, leaving a hole 10px wider than the piece that fills it
-      c.arc(ox, oy + m, t, Math.PI / 2, -Math.PI / 2, true);         // notch, biting in
-      c.closePath();
+    /* ---------------- V3.11: the visual challenge ----------------
+       The server owns the seed, the generated rasters and the four correct
+       choices. The browser receives only a punched scene, one loose piece and
+       four candidate coordinates per round; there is no local answer to read
+       from a closure, DOM node or response field. */
+    function validPoint(point) {
+      return !!point
+        && typeof point.x === 'number' && isFinite(point.x)
+        && typeof point.y === 'number' && isFinite(point.y)
+        && point.x >= 0 && point.x <= CAP_W - CAP_PIECE
+        && point.y >= 0 && point.y <= CAP_H - CAP_PIECE;
     }
 
-    // A small original scene: sky wash, hills, a low sun and a few windows.
-    function capDrawScene(c, w, h) {
-      var g = c.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, '#2b4a7a');
-      g.addColorStop(0.55, '#6f86a8');
-      g.addColorStop(1, '#c8b48a');
-      c.fillStyle = g;
-      c.fillRect(0, 0, w, h);
+    function validRaster(value) {
+      return typeof value === 'string'
+        && value.indexOf('data:image/png;base64,') === 0
+        && value.length <= 512000;
+    }
 
-      c.fillStyle = '#f0d9a0';
-      c.beginPath();
-      c.arc(w * 0.74, h * 0.34, 16, 0, Math.PI * 2);
-      c.fill();
+    function validRound(round) {
+      return !!round
+        && validRaster(round.scene)
+        && validRaster(round.piece)
+        && Array.isArray(round.holes)
+        && round.holes.length === 4
+        && round.holes.every(validPoint)
+        && validPoint(round.start);
+    }
 
-      c.fillStyle = '#3c5570';
-      c.beginPath();
-      c.moveTo(0, h * 0.72);
-      c.lineTo(w * 0.28, h * 0.48);
-      c.lineTo(w * 0.52, h * 0.72);
-      c.closePath();
-      c.fill();
+    function validChallenge(payload) {
+      return !!payload
+        && payload.version === 1
+        && Array.isArray(payload.rounds)
+        && payload.rounds.length === CAPTCHA_ROUNDS
+        && payload.rounds.every(validRound);
+    }
 
-      c.fillStyle = '#31485f';
-      c.beginPath();
-      c.moveTo(w * 0.34, h * 0.74);
-      c.lineTo(w * 0.66, h * 0.44);
-      c.lineTo(w, h * 0.74);
-      c.closePath();
-      c.fill();
+    function loadRaster(url) {
+      return new Promise(function (resolve) {
+        if (!IMAGE) { resolve(null); return; }
+        var img = new IMAGE();
+        img.onload = function () { resolve(img); };
+        img.onerror = function () { resolve(null); };
+        img.src = url;
+      });
+    }
 
-      c.fillStyle = '#243544';
-      c.fillRect(0, h * 0.72, w, h * 0.28);
-      for (var i = 0; i < 7; i++) {
-        var bx = 12 + i * 36, bh = 18 + ((i * 37) % 5) * 7;
-        c.fillStyle = '#1b2836';
-        c.fillRect(bx, h * 0.72 - bh, 24, bh);
-        c.fillStyle = '#e8c96a';
-        for (var r = 0; r < Math.floor(bh / 9); r++) {
-          if ((i + r) % 3 === 0) continue;
-          c.fillRect(bx + 5, h * 0.72 - bh + 4 + r * 9, 5, 5);
-          c.fillRect(bx + 14, h * 0.72 - bh + 4 + r * 9, 5, 5);
-        }
+    function capBuild(round) {
+      if (!validRound(round) || !capCanvas || !capPiece || !capCanvas.getContext) {
+        return Promise.resolve(false);
       }
-    }
-
-    function capBuild() {
-      if (!capCanvas || !capPiece || !capCanvas.getContext) return false;
       var c = capCanvas.getContext('2d');
       var pc = capPiece.getContext('2d');
-      if (!c || !pc) return false;
+      if (!c || !pc) return Promise.resolve(false);
+      var loadGen = ++capLoadGen;
+      capArmed = false;
+      capUsed = false;
+      capPiece.style.visibility = 'hidden';
+      setText(capText, 'Round ' + (capRound + 1) +
+        ' of ' + CAPTCHA_ROUNDS + '. Match the shapes; the piece may be rotated and recolored.');
 
-      // clean copy first, so the piece can be cut from an unpunched scene
-      var off = document.createElement('canvas');
-      off.width = CAP_W; off.height = CAP_H;
-      var oc = off.getContext('2d');
-      if (!oc) return false;
-      capDrawScene(oc, CAP_W, CAP_H);
-
-      // where the gap goes, and where the piece starts out
-      capTX = Math.round(80 + rnd() * (CAP_W - CAP_PIECE - 100));
-      capTY = Math.round(18 + rnd() * (CAP_H - CAP_PIECE - 36));
-      capHX = 6;
-      capHY = Math.round(CAP_H - CAP_PIECE - 8);
-      capPX = capHX; capPY = capHY;
-
-      c.clearRect(0, 0, CAP_W, CAP_H);
-      c.drawImage(off, 0, 0);
-      c.save();
-      capPath(c, capTX, capTY, CAP_PIECE);
-      c.fillStyle = 'rgba(10, 16, 24, 0.82)';
-      c.fill();
-      c.strokeStyle = '#0a1018';
-      c.lineWidth = 1;
-      c.stroke();
-      c.restore();
-
-      pc.clearRect(0, 0, CAP_PIECE, CAP_PIECE);
-      pc.save();
-      capPath(pc, 0, 0, CAP_PIECE);
-      pc.clip();
-      pc.drawImage(off, -capTX, -capTY);
-      pc.restore();
-      pc.save();
-      capPath(pc, 0, 0, CAP_PIECE);
-      pc.strokeStyle = '#ffffff';
-      pc.lineWidth = 1;
-      pc.stroke();
-      pc.restore();
-
-      capPlace();
-      return true;
+      return Promise.all([loadRaster(round.scene), loadRaster(round.piece)]).then(function (images) {
+        if (
+          loadGen !== capLoadGen || !capShown || stopped || banned
+          || !images[0] || !images[1]
+        ) return false;
+        try {
+          c.clearRect(0, 0, CAP_W, CAP_H);
+          c.drawImage(images[0], 0, 0, CAP_W, CAP_H);
+          pc.clearRect(0, 0, CAP_PIECE, CAP_PIECE);
+          pc.drawImage(images[1], 0, 0, CAP_PIECE, CAP_PIECE);
+        } catch (e) {
+          return false;
+        }
+        capHoles = round.holes.map(function (hole) { return [hole.x, hole.y]; });
+        capHX = round.start.x;
+        capHY = round.start.y;
+        capPX = capHX;
+        capPY = capHY;
+        capPlace();
+        capPiece.style.visibility = 'visible';
+        capArmed = true;
+        return true;
+      });
     }
 
     function capPlace() {
@@ -1532,7 +1528,7 @@
     /* V2.17. Both triggers are re-armed per cycle: a fresh time window, and a
        fresh miss threshold measured from wherever the counter stands now. */
     function scheduleCaptcha(now) {
-      if (!CAPTCHA_ON || capBroken) return;
+      if (!CAPTCHA_ON || !CAPTCHA_TIMED || capBroken || capSolvedCount > 0) return;
       capAt = now + CAPTCHA_MIN_MS + rnd() * (CAPTCHA_MAX_MS - CAPTCHA_MIN_MS);
       capMissTarget = shMisses.get() + CAPTCHA_MISS_MIN +
         Math.floor(rnd() * (CAPTCHA_MISS_MAX - CAPTCHA_MISS_MIN + 1));
@@ -1540,28 +1536,93 @@
 
     function showCaptcha(reason) {
       if (!CAPTCHA_ON || capBroken || capShown || won || stopped || banned) return;
-      if (!capBuild()) { capBroken = true; return; }   // no canvas, no captcha
-      // disarm both triggers for the duration; the solve re-arms them
+      // Disarm both triggers for the duration. Nothing becomes draggable until
+      // the authenticated start request returns four well-formed server rasters.
       capAt = Infinity;
       capMissTarget = 0;
       capCycle++;
       capShown = true;
+      capArmed = false;
+      capPayload = null;
+      capRound = 0;
+      capAnswers = [];
+      capHoles = [];
       capShownAt = NOW();
+      capShownWall = WALL();
+      capShownWall2 = wall2();
       capUsed = false;
       capLeftShown = -1;
       capClock.classList.remove('low');
       setText(capClock, Math.round(CAPTCHA_LIMIT_MS / 1000));
+      setText(capText, 'Loading visual verification...');
+      capPiece.style.visibility = 'hidden';
       capBox.classList.remove('hide');
       dropPointer();                 // the card carries on as if the cursor had left
       LOG('[AIMLAB] CAPTCHA SHOWN reason=' + reason);
+      Promise.resolve(challengeSignal('start', { cycle: capCycle })).then(function (payload) {
+        if (!capShown || stopped || banned) return;
+        if (payload && payload.unranked === true) {
+          setText(capText, 'Leaderboard unavailable. Continuing as an unranked run.');
+          acceptChallenge(true);
+          return;
+        }
+        if (payload && payload.refused && payload.error === 'challenge_retry_later') {
+          banPlayer('challenge-retry', payload.retryAfterSeconds);
+          return;
+        }
+        if (!validChallenge(payload)) { banPlayer('captcha-fail'); return; }
+        capPayload = payload;
+        capBuild(payload.rounds[0]).then(function (built) {
+          if (!built && capShown && !stopped && !banned) banPlayer('captcha-fail');
+        });
+      }, function () { banPlayer('captcha-fail'); });
     }
 
-    function solveCaptcha() {
-      if (!capShown) return;
-      LOG('[AIMLAB] CAPTCHA SOLVED ms=' + Math.round(NOW() - capShownAt));
+    function acceptChallenge(unranked) {
+      if (!capShown || capSolvedCount > 0) return;
+      var solveMs = Math.round(NOW() - capShownAt);
+      // Verification is mandatory but not part of a Practice score. Move all
+      // three captured clock origins together so the displayed/attested timer
+      // resumes from the instant the puzzle appeared. The server independently
+      // subtracts its own challenge timestamps from the eligible window.
+      if (CAPTCHA_TIMED && started && solveMs > 0) {
+        shStartT.set(shStartT.get() + solveMs);
+        startWall += WALL() - capShownWall;
+        startWall2 += wall2() - capShownWall2;
+        clkLast = null; clkPair = -1; clkStill = 0; rafSkew0 = null;
+      }
+      capSolvedCount++;
+      LOG('[AIMLAB] CAPTCHA SOLVED ms=' + solveMs + ' unranked=' + (unranked ? 1 : 0));
       capBeatT = NOW() + CAPTCHA_BEAT_MS;
       capPiece.classList.add('solved');
       capBox.classList.add('solved');
+    }
+
+    function solveCaptcha() {
+      if (!capShown || capAnswers.length !== CAPTCHA_ROUNDS) return;
+      capArmed = false;
+      setText(capText, 'Checking all four matches...');
+      var solveMs = Math.round(NOW() - capShownAt);
+      Promise.resolve(challengeSignal('solve', {
+        cycle: capCycle,
+        solveMs: solveMs,
+        answers: capAnswers.slice()
+      })).then(function (result) {
+        if (!capShown || stopped || banned) return;
+        if (result && result.solved === true) acceptChallenge(false);
+        else banPlayer(result && result.error === 'challenge_expired'
+          ? 'captcha-timeout' : 'captcha-fail');
+      }, function () { banPlayer('captcha-fail'); });
+    }
+
+    function challengeSignal(stage, detail) {
+      if (typeof opts.onChallenge !== 'function') return null;
+      try { return opts.onChallenge(stage, detail || {}); }
+      catch (e) { return null; /* game stays live */ }
+    }
+
+    function captchaComplete() {
+      return capSolvedCount > 0;
     }
 
     /* V2.16. Hand the engine the cursor back the instant the dialog closes, so
@@ -1581,22 +1642,28 @@
     /* V2.14. A failed verification ends the run: the audio stops, the captcha
        closes and the ban overlay takes the screen. Neither button is a win path,
        so neither is presence-gated -- any trusted click is enough. */
-    function banPlayer(reason) {
+    function banPlayer(reason, retryAfterSeconds) {
       if (banned || won || stopped) return;
       banned = true;
+      capLoadGen++;
       capShown = false;
+      capArmed = false;
       capDrag = false;
       capBeatT = 0;
       capBox.classList.add('hide');
       stopAudio();
       killErrorVoices();
-      setText(banSub, (reason === 'timeout')
-        ? 'Sixty seconds. The window outlasted you.'
-        : (reason === 'captcha-timeout')
-          ? 'You ran out of time.'
-          : 'That is not where the piece goes.');
+      setText(banTitle, reason === 'challenge-retry' ? 'PLEASE WAIT' : 'RUN FAILED');
+      setText(banSub, (reason === 'challenge-retry')
+        ? 'Too many recent mismatches. Try a fresh run in ' +
+          Math.max(1, Number(retryAfterSeconds) || 1) + ' seconds.'
+        : (reason === 'timeout')
+          ? 'Sixty seconds. The window outlasted you.'
+          : (reason === 'captcha-timeout')
+            ? 'You ran out of time.'
+            : 'That is not where the piece goes.');
       banBox.classList.remove('hide');
-      LOG('[AIMLAB] BANNED reason=' + reason);
+      LOG('[AIMLAB] RUN FAILED reason=' + reason);
 
       /* V3.5. Tell the shell how this ended, so the run history and the public
          feed can name the reason. Cosmetic only -- it cannot affect a score --
@@ -1629,19 +1696,32 @@
       if (capBeatT > 0 && now >= capBeatT) {
         capBeatT = 0;
         capShown = false;
+        capArmed = false;
         capDrag = false;
         capBox.classList.add('hide');
         capBox.classList.remove('solved');
         capPiece.classList.remove('solved');
         resumeFromShield(now);
-        scheduleCaptcha(now);            // V2.17: and here comes the next one
+        if (PRESTART_CHALLENGE && !started) {
+          function beginVerifiedChase() {
+            if (!started && !stopped && !banned) startTimer();
+          }
+          // reportChallenge resolves only after the solve and the urgent
+          // chase:true heartbeat have settled, so server and local clocks begin
+          // in the same order even on a slow connection.
+          Promise.resolve(challengeSignal('ready', { cycle: capCycle }))
+            .then(beginVerifiedChase, beginVerifiedChase);
+        } else {
+          challengeSignal('ready', { cycle: capCycle });
+        }
+        scheduleCaptcha(now);            // a solved one-time challenge does not re-arm
       }
     }
 
     // Trusted pointer only, so a dispatched drag solves nothing. Touch is
     // welcome here: solving the captcha is not winning the game.
     on(capPiece, 'pointerdown', function (e) {
-      if (!capShown || capBeatT > 0 || !e.isTrusted) return;
+      if (!capShown || !capArmed || capBeatT > 0 || !e.isTrusted) return;
       var r = boxOf(capScene);
       capL = r.left; capT = r.top;
       capDX = e.clientX - (capL + capPX);
@@ -1666,13 +1746,29 @@
     function capRelease(e) {
       if (!capDrag) return;
       capDrag = false;
-      if (capUsed) return;               // V2.14: exactly one drop, ever
+      capArmed = false;
+      if (capUsed) return;               // exactly one drop per server round
       capUsed = true;
-      var dx = capPX - capTX, dy = capPY - capTY;
-      if (Math.sqrt(dx * dx + dy * dy) <= CAPTCHA_TOL) {
-        capPX = capTX; capPY = capTY;
+      var choice = -1, nearest = Infinity;
+      for (var i = 0; i < capHoles.length; i++) {
+        var dx = capPX - capHoles[i][0], dy = capPY - capHoles[i][1];
+        var distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance < nearest) { nearest = distance; choice = i; }
+      }
+      if (choice >= 0 && nearest <= CAPTCHA_TOL) {
+        capPX = capHoles[choice][0];
+        capPY = capHoles[choice][1];
         capPlace();
-        solveCaptcha();
+        capAnswers.push(choice);
+        if (capRound + 1 < capPayload.rounds.length) {
+          capRound++;
+          capPiece.style.visibility = 'hidden';
+          capBuild(capPayload.rounds[capRound]).then(function (built) {
+            if (!built && capShown && !stopped && !banned) banPlayer('captcha-fail');
+          });
+        } else {
+          solveCaptcha();
+        }
       } else {
         banPlayer('captcha-fail');        // no snap-back, no second try
       }
@@ -1833,35 +1929,57 @@
       checkPlayable();
     }
 
-    function clampIntoView() {
+    function playBounds() {
       var hw = cardW / 2, hh = cardH / 2;
-      var minX = hw + EDGE_PAD, maxX = vw - hw - EDGE_PAD;
-      var minY = hh + EDGE_PAD, maxY = vh - hh - EDGE_PAD;
+      var fieldLeft = (vw - PLAYFIELD_W) / 2;
+      var fieldTop = (vh - PLAYFIELD_H) / 2;
+      return {
+        minX: fieldLeft + hw + EDGE_PAD,
+        maxX: fieldLeft + PLAYFIELD_W - hw - EDGE_PAD,
+        minY: fieldTop + hh + EDGE_PAD,
+        maxY: fieldTop + PLAYFIELD_H - hh - EDGE_PAD
+      };
+    }
+
+    function clampIntoView() {
+      var bounds = playBounds();
       // If the viewport is smaller than the card there is no legal band; park it
       // centered. Unreachable during play now that playable() gates the run, but
       // kept as the safety net it always was.
-      x = (maxX > minX) ? Math.min(maxX, Math.max(minX, x)) : vw / 2;
-      y = (maxY > minY) ? Math.min(maxY, Math.max(minY, y)) : vh / 2;
+      x = (bounds.maxX > bounds.minX)
+        ? Math.min(bounds.maxX, Math.max(bounds.minX, x)) : vw / 2;
+      y = (bounds.maxY > bounds.minY)
+        ? Math.min(bounds.maxY, Math.max(bounds.minY, y)) : vh / 2;
     }
 
-    /* Ruling 3. Below this the card has nowhere to flee: the legal band collapses,
-       the engine parks it dead centre and the chase stops being a chase. That is
-       reachable without any tooling -- a half-height window, or Ctrl+= to 500%,
-       which divides the CSS viewport and froze the card outright. Rather than
-       let a pinned playfield produce a "record", the run pauses behind a Win95
-       dialog with the clock stopped, and resumes untouched when the window comes
-       back. No accusation: resizing a browser is not cheating. */
+    function spawnCoordinate(min, max, unit, fallback) {
+      return (max > min) ? min + unit * (max - min) : fallback;
+    }
+
+    // Simulation does not inherit the centred placeholder that sat behind the
+    // Flappy handoff. Once verification closes, draw fresh browser entropy and
+    // sample both axes independently across the entire legal play band.
+    function randomizeSpawn() {
+      var bounds = playBounds();
+      seed = strongSeed();
+      x = spawnCoordinate(bounds.minX, bounds.maxX, rnd(), vw / 2);
+      y = spawnCoordinate(bounds.minY, bounds.maxY, rnd(), vh / 2);
+      heading = rnd() * Math.PI * 2;
+      vx = 0;
+      vy = 0;
+      render();
+    }
+
+    /* Ruling 3. Every ranked run uses the same centred field. A smaller browser
+       (or browser zoom, which shrinks the CSS viewport) pauses instead of making
+       the escape area easier; a larger browser adds scenery, not room to flee. */
     function playable() {
-      return vw >= cardW + 2 * EDGE_PAD + PLAY_MARGIN &&
-             vh >= cardH + 2 * EDGE_PAD + PLAY_MARGIN;
+      return vw >= PLAYFIELD_W && vh >= PLAYFIELD_H;
     }
 
     function enterPause() {
       if (paused || won || stopped) return;
       paused = true;
-      pauseAt = NOW();
-      pauseWall = WALL();
-      pauseWall2 = wall2();
       pauseBox.classList.remove('hide');
     }
 
@@ -1873,19 +1991,10 @@
          restores focus also lands on the page. */
       arm();
       pauseBox.classList.add('hide');
-      /* A small-window pause skips its interval on every clock the engine keeps,
-         so it can neither pad a time nor read as drift. An unfocused pause
-         deliberately does NOT: the run timer and the shot clock both keep
-         counting while you are away, so alt-tabbing costs you the time instead
-         of banking it. Advancing none of the three keeps them consistent with
-         each other, which is what the drift check actually compares. */
-      var d = NOW() - pauseAt;
-      if (started && d > 0 && !pauseWasUnfocused) {
-        shStartT.set(shStartT.get() + d);
-        startWall += WALL() - pauseWall;
-        startWall2 += wall2() - pauseWall2;
-      }
-      pauseWasUnfocused = false;
+      /* Every pause keeps costing wall-clock time. Otherwise a resized client
+         can bank arbitrarily long timer-free intervals while the server sees a
+         live run, then claim a shorter score. The fixed field makes the pause
+         fair; the two-sided server clock makes it enforceable. */
       clkLast = null; clkPair = -1; clkStill = 0; rafSkew0 = null;
       audioT0 = -1; audioBad = 0;
       accumMs = 0;
@@ -1899,7 +2008,6 @@
       if (won || stopped) return;
       pauseSmall = !playable();
       if (pauseSmall || pauseUnfocused) {
-        if (pauseUnfocused) pauseWasUnfocused = true;
         if (pauseSmall) {
           setText(pauseL1, 'This window is too small to run away in.');
           setText(pauseL2, 'Make the browser bigger to carry on.');
@@ -1907,12 +2015,7 @@
           setText(pauseL1, 'He does not perform for an empty room.');
           setText(pauseL2, 'Click back into the window to carry on.');
         }
-        /* The small-window pause is a state you cannot play in, so it hands the
-           time back. Walking away is a choice, so it does not -- and the sub-line
-           says so rather than letting the player find out at the ban screen. */
-        setText(pauseSub, pauseWasUnfocused
-          ? 'Paused. The clock is STILL RUNNING.'
-          : 'Paused. The clock is not running.');
+        setText(pauseSub, 'Paused. The clock is STILL RUNNING.');
         enterPause();
         return;
       }
@@ -1929,6 +2032,7 @@
        alone cannot undo a zero-distance start. */
     function arm() {
       var now = NOW();
+      resetAimTrail();
       armAt = now;
       armFrame = framesRun;
       wakeUntil = now + WAKE_MS;
@@ -2001,6 +2105,32 @@
 
     /* ---------------- pointer ---------------- */
 
+    function resetAimTrail() {
+      aimAt = -1e9;
+      aimFrame = -1e9;
+    }
+
+    function recordAimMove(cx, cy, t) {
+      if (paused || capShown || won || stopped) { resetAimTrail(); return; }
+      var dx = cx - (x + btnOffX), dy = cy - (y + btnOffY);
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d > AIM_RADIUS) { resetAimTrail(); return; }
+      // Keep the first observed middle-band point. Direct automation that reads
+      // the current rect and jumps straight to its centre reports d ~= 0 only.
+      if (d > AIM_CLOSE_PX && aimAt <= -1e8) {
+        aimAt = t;
+        aimFrame = framesRun;
+      }
+    }
+
+    function aimJourneyOK() {
+      var age = NOW() - aimAt;
+      return aimAt > -1e8
+          && age >= AIM_MIN_MS
+          && age <= AIM_MAX_MS
+          && (framesRun - aimFrame) >= AIM_MIN_FRAMES;
+    }
+
     function setPointer(cx, cy, t) {
       px = cx;
       py = cy;
@@ -2028,13 +2158,15 @@
       cvx = 0; cvy = 0;
       velT = 0;
       nearInside = false;
+      resetAimTrail();
     }
 
     /* V3.9. Losing focus used to just drop the pointer, which disarmed the whole
        flee block and left the card idling for anyone who wanted to line up on it
        from outside the window. An unfocused playfield is now a PAUSED one: the
-       clock stops (so nothing is gained by it), the X goes inert, and coming
-       back re-arms. Still no accusation -- alt-tabbing is not cheating. */
+       X goes inert and coming back re-arms, while the run and shot clocks keep
+       charging the time spent away. Still no accusation -- alt-tabbing is not
+       cheating, but it cannot bank a frozen attempt either. */
     function onBlur(e) {
       if (e && e.isTrusted === false) return;
       if (document.hasFocus && document.hasFocus()) return;
@@ -2061,6 +2193,7 @@
       // there. Dispatched moves still push the physics around, as they always
       // did, but they cannot vouch for a press.
       if (e.isTrusted) {
+        recordAimMove(e.clientX, e.clientY, t);
         moveT = t; moveX = e.clientX; moveY = e.clientY;
         if (firstMoveFrame < 0) firstMoveFrame = framesRun;
       }
@@ -2279,6 +2412,15 @@
             addMiss('clickspam');
             return;
           }
+          if (!aimJourneyOK()) {
+            showTaunt(TAUNT_TELEPORT);
+            addMiss('aim-journey');
+            return;
+          }
+          if (!captchaComplete()) {
+            showCaptcha('win');
+            return;
+          }
           win();
           return;
         }
@@ -2366,8 +2508,9 @@
       }
 
       var hw = cardW / 2, hh = cardH / 2;
-      var minX = hw + EDGE_PAD, maxX = vw - hw - EDGE_PAD;
-      var minY = hh + EDGE_PAD, maxY = vh - hh - EDGE_PAD;
+      var bounds = playBounds();
+      var minX = bounds.minX, maxX = bounds.maxX;
+      var minY = bounds.minY, maxY = bounds.maxY;
 
       // distance from the cursor to the nearest point of the card rect
       var d = Infinity, awx = 0, awy = 0;
@@ -2745,7 +2888,8 @@
         }
       }
 
-      // Paused: the picture holds, the clock holds, and nothing is judged.
+      // Paused: the picture holds, but elapsed wall time continues to count and
+      // is judged as soon as the field resumes.
       if (paused) return;
 
       integrate(dtMs, t);
@@ -2761,9 +2905,8 @@
       // Layer D samples between sub-step batches: the transform on screen is the
       // one this frame just drew, so it can be compared against the position the
       // engine integrated to.
-      /* V2.19. Checked before capTick, so the game clock outranks the captcha's
-         own 60 s limit: reaching zero mid-captcha bans immediately, and for the
-         run being timed out rather than for the puzzle. */
+      /* V2.19. Simulation verification happens before this timer begins, so the
+         shot clock always measures Chase rather than puzzle time. */
       if (SHOT_CLOCK_ON && started && !won && !banned) {
         var elapsed = t - shStartT.get();
         var leftMs = SHOT_CLOCK_MS - elapsed;
@@ -2780,7 +2923,12 @@
       if (geomDirty) { geomDirty = false; checkStructure(); attest(); }
       if (--attestIn <= 0) { attestIn = ATTEST_FRAMES; checkStructure(); attest(); }
 
-      if (started) setText(elTime, fmt(t - shStartT.get()));
+      if (started) {
+        // Hold the visible number while the timed Practice puzzle is unsolved;
+        // solveCaptcha then removes the same interval from every clock origin.
+        var clockNow = (CAPTCHA_TIMED && capShown && capBeatT === 0) ? capShownAt : t;
+        setText(elTime, fmt(clockNow - shStartT.get()));
+      }
     }
 
     /* B5. rAF ids are a page-global integer namespace, so capturing the function
@@ -3068,12 +3216,13 @@
 
     lastT = NOW();
     simT = lastT;
-    /* Ruling 1: the clock starts when the chase does. Entering a mode is itself a
-       deliberate gesture, and starting on first input let a player park the
-       cursor, start the run from the keyboard and click a card that had never
-       moved -- a two-millisecond "record" with no tampering of any kind. */
-    startTimer();
     checkPlayable();
+    /* Ruling 1: the clock starts when the Chase does. Simulation's mandatory
+       visual challenge lives between Flappy and Chase, so it is displayed now
+       and startTimer() is deferred until its success beat closes the dialog.
+       Practice starts immediately and receives its one random early challenge. */
+    if (PRESTART_CHALLENGE) showCaptcha('pre-chase');
+    else startTimer();
     rafId = RAF(frame);
     watchdog = EVERY(heartbeat, 500);
 

@@ -4,6 +4,8 @@ const crypto = require('node:crypto');
 
 const SESSION_COOKIE = 'eal_session';
 const STATE_COOKIE = 'eal_oauth_state';
+const SESSION_SUB_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const MAX_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
 
 function b64url(buf) {
   return Buffer.from(buf).toString('base64url');
@@ -41,7 +43,7 @@ function signSession(secret, { sub, nowMs, ttlMs, epoch = 0 }) {
 function verifySession(secret, token, nowMs) {
   if (typeof token !== 'string' || token.length === 0 || token.length > 1024) return null;
   const dot = token.indexOf('.');
-  if (dot <= 0 || dot === token.length - 1) return null;
+  if (dot <= 0 || dot === token.length - 1 || dot !== token.lastIndexOf('.')) return null;
   const body = token.slice(0, dot);
   const sig = token.slice(dot + 1);
   if (!safeEqual(sig, b64url(hmac(secret, body)))) return null;
@@ -52,14 +54,22 @@ function verifySession(secret, token, nowMs) {
   } catch {
     return null;
   }
-  if (!payload || typeof payload.sub !== 'string' || payload.sub.length === 0) return null;
-  if (!Number.isFinite(payload.exp) || payload.exp <= nowMs) return null;
+  if (!payload || !SESSION_SUB_RE.test(payload.sub)) return null;
+  if (!Number.isSafeInteger(payload.iat) || payload.iat > nowMs) return null;
+  if (
+    !Number.isSafeInteger(payload.exp)
+    || payload.exp <= nowMs
+    || payload.exp <= payload.iat
+    || payload.exp - payload.iat > MAX_SESSION_LIFETIME_MS
+  ) return null;
+  const epoch = payload.ep === undefined ? 0 : payload.ep;
+  if (!Number.isSafeInteger(epoch) || epoch < 0) return null;
   return {
     sub: payload.sub,
     iat: payload.iat,
     exp: payload.exp,
     // Tokens minted before the epoch existed are treated as epoch 0.
-    epoch: Number.isFinite(payload.ep) ? payload.ep : 0,
+    epoch,
   };
 }
 
@@ -188,6 +198,7 @@ function clearedStateCookie() {
 module.exports = {
   SESSION_COOKIE,
   STATE_COOKIE,
+  MAX_SESSION_LIFETIME_MS,
   signSession,
   verifySession,
   createState,

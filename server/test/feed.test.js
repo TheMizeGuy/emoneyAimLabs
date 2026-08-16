@@ -7,7 +7,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createFeed, DEFAULT_HISTORY } = require('../feed');
+const { createFeed, DEFAULT_HISTORY, DEFAULT_MAX_INFLIGHT_SAVES } = require('../feed');
 
 function sink() {
   return {
@@ -125,4 +125,37 @@ test('emit still reports live deliveries only, and history has a default depth',
   feed.subscribe(s);
   assert.equal(feed.emit('run_started', { n: 1 }), 1);
   assert.ok(DEFAULT_HISTORY >= 50, 'deep enough to fill the client log from cold');
+});
+
+test('a slow SSE client is dropped as soon as its response buffer backpressures', () => {
+  const feed = createFeed({ now: () => 1 });
+  const slow = sink();
+  feed.subscribe(slow);
+  slow.write = function write(frame) {
+    this.frames.push(frame);
+    return false;
+  };
+
+  assert.equal(feed.emit('run_won', { n: 1 }), 0);
+  assert.equal(feed.size(), 0);
+  assert.equal(slow.ended, true);
+});
+
+test('stalled feed persistence is hard-bounded instead of filling the pool queue', () => {
+  let started = 0;
+  const feed = createFeed({
+    now: () => 1,
+    save() {
+      started += 1;
+      return new Promise(() => {});
+    },
+  });
+
+  for (let i = 0; i < DEFAULT_MAX_INFLIGHT_SAVES + 20; i += 1) {
+    feed.emit('run_won', { n: i });
+  }
+
+  assert.equal(started, DEFAULT_MAX_INFLIGHT_SAVES);
+  assert.equal(feed.inflightSaves(), DEFAULT_MAX_INFLIGHT_SAVES);
+  assert.equal(feed.droppedSaves(), 20);
 });

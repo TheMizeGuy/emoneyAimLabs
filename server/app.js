@@ -8,6 +8,7 @@ const {
   csrfWallFor,
   sessionLoaderFor,
   rateLimit,
+  clientAddress,
 } = require('./middleware');
 const { createAuthRouter } = require('./auth');
 const { createApiRouter } = require('./api');
@@ -54,9 +55,6 @@ function createApp(deps) {
 
   app.disable('x-powered-by');
   app.disable('etag');
-  // Railway terminates TLS in front of the app, so the client address the rate
-  // limiter keys on comes from the proxy header.
-  app.set('trust proxy', 1);
 
   app.use(securityHeaders);
   app.use(requestLogger(log));
@@ -70,7 +68,7 @@ function createApp(deps) {
   // flood. Mounted after /healthz so Railway's healthcheck is never throttled.
   app.use(rateLimit(
     deps.limiter,
-    (req) => `ip:${req.ip}`,
+    (req) => `ip:${clientAddress(req)}`,
     deps.globalIpLimit || GLOBAL_IP_LIMIT,
     MINUTE_MS,
     recorder.note,
@@ -81,9 +79,13 @@ function createApp(deps) {
   // to whoever's cookie it carried.
   app.use(sessionLoaderFor(config, deps.now));
   app.use(csrfWallFor(config.gameOrigin, recorder.note));
+  // Bound every JSON-bearing route, including /auth/logout and unknown POST
+  // paths. Limiting only /api left the rest of the state-changing surface able
+  // to receive an arbitrarily large body from a non-browser caller.
+  app.use(express.json({ limit: BODY_LIMIT }));
 
   app.use('/auth', createAuthRouter(deps));
-  app.use('/api', express.json({ limit: BODY_LIMIT }), createApiRouter(deps));
+  app.use('/api', createApiRouter(deps));
 
   app.use((req, res) => sendError(res, 404, 'not_found', 'No such endpoint'));
 

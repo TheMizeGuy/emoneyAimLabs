@@ -18,11 +18,11 @@
    nature: the OAuth exchange, the client secret and the session HMAC are all
    server-side. Two copies of the signed session travel from here: the httpOnly
    cookie (rides on credentials: 'include', works where third-party cookies
-   still exist) and, since V3.7, the same token held in localStorage and sent
-   as an Authorization bearer -- because Safari and Firefox never present a
-   railway.app cookie to this page's fetch, which made sign-in a silent no-op
-   there. The token arrives once, in the login redirect's URL fragment, and is
-   scrubbed from the address bar before anything else runs.
+   still exist) and, since V3.7, the same token held in tab-scoped
+   sessionStorage and sent as an Authorization bearer -- because Safari and
+   Firefox never present a railway.app cookie to this page's fetch, which made
+   sign-in a silent no-op there. The token arrives once, in the login redirect's
+   URL fragment, and is scrubbed from the address bar before anything else runs.
 
    The only global is window.AimlabNet, frozen.
 */
@@ -48,10 +48,14 @@
   var TOKEN_KEY = 'eal_session';
 
   function readToken() {
-    try { return W.localStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+    try { return W.sessionStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
   }
 
   function dropToken() {
+    try { W.sessionStorage.removeItem(TOKEN_KEY); } catch (e) { }
+    // V3.10 migration: old clients persisted a bearer across tabs and browser
+    // restarts. GitHub Pages paths share one origin, so remove that wider copy
+    // even when the current tab does not hold a session.
     try { W.localStorage.removeItem(TOKEN_KEY); } catch (e) { }
   }
 
@@ -59,10 +63,14 @@
      before any frame paints, and scrub the fragment so the token never sits in
      the address bar, a bookmark, or a share. */
   (function harvest() {
+    // Purge the V3.7-V3.9 persistent location on every load. We deliberately do
+    // not migrate it: requiring a fresh login is safer than extending a bearer
+    // whose exposure window was wider than the current policy.
+    try { W.localStorage.removeItem(TOKEN_KEY); } catch (e) { }
     var h = '';
     try { h = W.location.hash || ''; } catch (e) { return; }
     if (h.indexOf('#session=') !== 0) return;
-    try { W.localStorage.setItem(TOKEN_KEY, decodeURIComponent(h.slice(9))); } catch (e) { }
+    try { W.sessionStorage.setItem(TOKEN_KEY, decodeURIComponent(h.slice(9))); } catch (e) { }
     try { W.history.replaceState(null, '', W.location.pathname + W.location.search); } catch (e) { }
   })();
 
@@ -71,8 +79,8 @@
   var COOLDOWN_MS = 30000;
   var deadUntil = 0;
 
-  function offline() {
-    return !CONFIGURED || Date.now() < deadUntil;
+  function offline(force) {
+    return !CONFIGURED || (!force && Date.now() < deadUntil);
   }
 
   function markDead() {
@@ -81,8 +89,8 @@
 
   /* The one place a network error can occur, and it is swallowed here.
      Resolves to the parsed body, or to null for every failure mode there is. */
-  function call(method, path, body, wantError) {
-    if (offline()) return Promise.resolve(null);
+  function call(method, path, body, wantError, force) {
+    if (offline(force)) return Promise.resolve(null);
 
     var ctrl = null;
     try { if (W.AbortController) ctrl = new W.AbortController(); } catch (e) { ctrl = null; }
@@ -147,13 +155,25 @@
              is offline" -- while the leaderboard was up and had just answered.
              The server ships a human-readable message per code; callers that ask
              for it get the refusal instead of a lie. A 5xx is still an outage. */
-          if (!wantError || res.status >= 500) return done(null);
+          if (res.status >= 500) { markDead(); return done(null); }
+          if (!wantError) return done(null);
           return res.json().then(
-            function (j) { done({ refused: true, error: (j && j.error) || '', message: (j && j.message) || '' }); },
+            function (j) {
+              done({
+                refused: true,
+                error: (j && j.error) || '',
+                message: (j && j.message) || '',
+                retryAfterSeconds: (j && typeof j.retryAfterSeconds === 'number')
+                  ? j.retryAfterSeconds : 0
+              });
+            },
             function () { done({ refused: true, error: '', message: '' }); });
         }
         if (res.status === 204) return done(true);
-        return res.json().then(function (j) { done(j); }, function () { done(null); });
+        return res.json().then(function (j) { done(j); }, function () {
+          markDead();
+          done(null);
+        });
       }, function () {
         markDead();
         done(null);
@@ -176,8 +196,16 @@
   }
 
   function logout() {
+    // Build the request while the bearer copy still exists. Browsers that block
+    // the cross-site cookie rely on this header for the server-side epoch bump;
+    // deleting first made logout look successful without actually revoking it.
+    // Logout bypasses the ordinary outage cooldown. One transient failure must
+    // not turn a healthy server-side revocation into a local-only token delete.
+    var request = call('POST', '/auth/logout', null, false, true);
     dropToken();
-    return call('POST', '/auth/logout', null).then(function () { return true; });
+    // The local copy is gone either way. True means the server also confirmed
+    // its epoch bump; false means a captured copy may remain live until expiry.
+    return request.then(function (revoked) { return revoked === true; });
   }
 
   /* mode: 'practice' | 'simulation'. Resolves to {runId, nonce, chain}, or null.
@@ -244,10 +272,13 @@
      V3.5 adds type:'ban' with a reason, which colours the feed line and the
      player's run history. It is cosmetic by design -- the server validates the
      reason against an enum and it can never move a leaderboard row. */
-  function event(type, reason) {
+  function event(type, reason, runId, detail) {
     var body = { type: type };
     if (reason) body.reason = reason;
-    call('POST', '/api/event', body);
+    if (runId) body.runId = runId;
+    if (detail && Array.isArray(detail.answers)) body.answers = detail.answers.slice();
+    return call('POST', '/api/event', body,
+      type === 'challenge_start' || type === 'challenge_solve');
   }
 
   // Resolves to the server's payload (rows + optional own row), or null.
@@ -281,7 +312,7 @@
   /* run_started is deliberately absent (V3.8): the server stopped emitting
      them, and skipping the name here keeps any old stored line from rendering
      during the replay window either. */
-  var FEED_KINDS = ['run_won', 'run_failed', 'flappy_death'];
+  var FEED_KINDS = ['run_won', 'run_failed', 'flappy_death', 'cheat_detected'];
 
   function openFeed(onLine, onState) {
     var ES = W.EventSource;

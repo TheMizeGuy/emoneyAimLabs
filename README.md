@@ -18,14 +18,19 @@ tiny Windows-95-style popup window that does not want to be closed: it
 wanders the desktop, and the moment your cursor gets close, it flees
 faster. Click the beveled X in its title bar to end its life. The timer
 starts the moment the chase does, and misses, near-misses and your best
-time are tracked and saved locally.
+time are tracked and saved locally. A one-attempt visual verification appears
+at a random point 0.5-1.8 seconds after Chase starts; its solve time is not part
+of the score. It has four independently seeded matching rounds. A wrong match
+fails only that run; repeated rapid mismatches add a brief retry delay capped at
+one minute, not an account ban.
 
 **Simulation (LOUD!)** - TURN YOUR VOLUME DOWN FIRST. This mode is
 genuinely loud. It opens with a from-scratch Flappy-style gauntlet: flap
 through pipes until you reach 10 points in a single run (any death
 resets your score to zero). Clear that and the chase begins, now with a
 different face on the run and an 8-second audio loop playing at full
-volume for the rest of the round.
+volume for the rest of the round. The visual verification runs between Flappy
+and Chase, and the popup then spawns at a fresh random position.
 
 Every missed click in Simulation triggers its own synthesized
 Windows-error chord, mixed under the loop. Practice Mode is silent.
@@ -33,8 +38,19 @@ Windows-error chord, mixed under the loop. Practice Mode is silent.
 ## Fair play
 
 The close button only responds to a real mouse click that arrives where
-the pointer actually is, and the game keeps a running tally of anything
-that looks like tampering. None of it locks you out; it just says so.
+the pointer actually is after a current multi-frame approach, and every ranked
+run uses the same 1120 x 620 playfield even if the browser is resized. The game
+keeps a running tally of anything that looks like tampering. Posted scores also
+need one fresh visual challenge, a single-use server run, server-timed phases,
+a two-sided elapsed-time check, and a paced heartbeat chain. High-confidence
+clock/challenge violations close the run and appear in the public Activity Log.
+An ordinary wrong visual match is recorded only as a failed run, never as a
+cheating accusation.
+
+These checks stop fabricated instant scores, timer-free resize pauses, replay,
+and ordinary scripted events. They cannot prove that a human, rather than a
+modified client or full browser automation, executed a correctly timed protocol;
+the detailed threat model and current residual are in `docs/anti-cheat-audit.md`.
 
 ## Leaderboard
 
@@ -44,8 +60,8 @@ tallies: total, deaths in the gauntlet, and windows that got away. Anyone can
 read it, signed in or not. Play without signing in and everything works exactly
 the same; your time just does not get posted.
 
-The GAME tab carries an activity log that streams runs as they happen -- who
-started, who won, and where the ones that failed went wrong. Clicking any name,
+The GAME tab carries an activity log that streams completed runs, failures, and
+high-confidence cheating detections. Clicking any name,
 in the log or on the leaderboard, opens that player's record: best time per mode,
 failure counts, and their recent runs.
 

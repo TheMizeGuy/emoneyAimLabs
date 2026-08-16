@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https://emoney-aimlabs-api-production.up.railway.app; media-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; upgrade-insecure-requests">
 <title>eMoney Aim Labs</title>
 <!-- data: icon so the browser never issues a /favicon.ico request -->
 <link rel="icon" href="data:,">
@@ -16,10 +17,10 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "488175a488df63d2ac700466cc7cb99b76054314e6382b1b648b538b9fc86ea3",
-  "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
-  "js/net.js": "227c2dc6d577cdd1ece8192a359c8f7ede66193796688e03dd3751fd70ea049b",
-  "js/main.js": "0f113f48a982a9269e60e1a16fcd9619e20f603a6349f3b2bf755b6a04c092d2"
+  "js/chase.js": "c351bcaf512a43984f770c81f4eea8e2fd8cdf00ba5feb35c5cad8b7eb06a41c",
+  "js/flappy.js": "02e01c9cdd73de6cbe19558e11266efcf8b2c9d2aaae8a56874348a8955be432",
+  "js/net.js": "0f5142122633705621a3073b9d8eca537a0e1b563bdb05d97bd017230b348b2e",
+  "js/main.js": "f665c0c6121900530eec57803fda88687819b490bd5cdfea7f3ec5bf6a54f78f"
 }
 </script>
 <style>
@@ -1629,8 +1630,8 @@
 
   .shame.hide { display: none; }
 
-  /* ---- V2.12 captcha dialog ----
-     Simulation only. Sits above the playfield and takes every pointer event, so
+  /* ---- visual verification dialog ----
+     Both ranked modes use it. It sits above the playfield and takes every pointer event, so
      the X behind it is unreachable while it is up. All of its art is drawn by
      chase.js onto the two canvases; nothing here is an image. */
   .capbox {
@@ -1659,7 +1660,7 @@
   .capscene {
     position: relative;
     width: 260px;
-    height: 150px;
+    height: 140px;
     margin: 0 auto;
     border: 2px solid;
     border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
@@ -1672,7 +1673,7 @@
   .cappiece {
     position: absolute;
     left: 6px;
-    top: 96px;
+    top: 86px;
     cursor: grab;
     filter: drop-shadow(1px 1px 0 rgba(0, 0, 0, 0.6));
     touch-action: none;
