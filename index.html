@@ -17,7 +17,7 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "91cc1e0b4402a8ad76426ab538821145cce43db95d3c5c966bc2d0d91f2483b0",
+  "js/chase.js": "344537009256c83fd20922adb599db1c7cdc51a0342124b4cad4ccd947b548e3",
   "js/flappy.js": "9f3e7edc6efa1ef71965de76494e1e1e8d107fa6d53256cf2df0e5ab4991f959",
   "js/net.js": "8902ac4006669c880c6786c1512813bc766e81e00fa3cdbddf85287648a2d553",
   "js/main.js": "d94ad03019960a55222c0872b262e5948a9c8c1daf81920c07e222a9fe302000"
@@ -1530,19 +1530,19 @@
      crosshair rather than promising a safe target. */
   .fold {
     position: absolute;
-    width: 96px;
+    width: 132px;
     display: grid;
     justify-items: center;
-    gap: 5px;
-    padding-top: 7px;      /* room for the tab, so it never clips the layer */
+    gap: 6px;
+    padding-top: 10px;     /* room for the tab, so it never clips the layer */
     cursor: crosshair;
     pointer-events: auto;
   }
 
   .foldic {
     position: relative;
-    width: 46px;
-    height: 32px;
+    width: 68px;
+    height: 48px;
     background: #fbe792;
     border: 1px solid #000;
     box-shadow: inset 1px 1px 0 #fffbd0, inset -1px -1px 0 #b98e2c;
@@ -1552,21 +1552,21 @@
     content: "";
     position: absolute;
     left: -1px;
-    top: -7px;
-    width: 19px;
-    height: 6px;
+    top: -10px;
+    width: 28px;
+    height: 9px;
     background: #fbe792;
     border: 1px solid #000;
     border-bottom: 0;
   }
 
   .foldlb {
-    max-width: 96px;
+    max-width: 132px;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
     font-family: var(--w95);
-    font-size: 11px;
+    font-size: 12px;
     color: #fff;
     text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
   }
@@ -1576,7 +1576,7 @@
   .fw {
     position: absolute;
     box-sizing: border-box;
-    width: 232px;
+    width: 300px;
     background: var(--w95-face);
     border: 2px solid;
     border-color: var(--w95-hilite) var(--w95-dark) var(--w95-dark) var(--w95-hilite);
@@ -1643,9 +1643,9 @@
   .fwx:focus { outline: none; }
   .fwx:focus-visible { outline: 1px dotted #000; outline-offset: 1px; }
 
-  /* 112px of pane keeps the whole window at the 156px chase.js places by */
+  /* 166px of pane keeps the whole window at the 210px chase.js places by */
   .fwbody {
-    height: 112px;
+    height: 166px;
     margin: 4px;
     display: flex;
     align-items: center;

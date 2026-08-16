@@ -554,6 +554,7 @@
     var TAUNT_ARMING   = 'He is not even awake yet. Wait for him.';
     var TAUNT_SPAM     = 'That is a macro, not a hand. Aim once instead.';
     var TAUNT_FOLDER   = 'You have a folder open. One mess at a time.';
+    var TAUNT_AUTOPOP  = 'A folder opened itself. Deal with it.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
@@ -2363,13 +2364,22 @@
        close it, it just leaves the X refusing forever. All annoyance, never a
        wall the server relies on -- the run and shot clocks charge throughout,
        and closing a window costs nothing but the trip. */
-    var FOLDER_COUNT   = 7;
-    var FOLDER_MIN_GAP = 130;   // px between icon origins when seeding
-    var FW_W = 232, FW_H = 156; // the folder window, chrome included
-    var FOLDER_NAMES = ['New Folder', 'New Folder (2)', 'My Documents',
-                        'DO NOT OPEN', 'taxes 1997', 'backup (final)',
-                        'eMoney private', 'sim results OLD'];
+    var FOLDER_COUNT   = 10;
+    var FOLDER_MIN_GAP = 150;   // px between icon origins when seeding
+    var FW_W = 300, FW_H = 210; // the folder window, chrome included
+    var FOLDER_NAMES = ['New Folder', 'New Folder (2)', 'New Folder (3)',
+                        'My Documents', 'DO NOT OPEN', 'taxes 1997',
+                        'backup (final)', 'backup (final) FINAL',
+                        'eMoney private', 'sim results OLD', 'untitled',
+                        'wedding pics 2003'];
+    /* V4.1: the desktop opens folders on its own. Every few seconds of live
+       Chase a random closed folder pops its window over the field -- same
+       economy as a clicked one, so it is pressure on the shot clock, never a
+       new wall, and it never charges a miss the player did not click for. */
+    var FOLDER_POP_MIN_MS = 4000, FOLDER_POP_MAX_MS = 7000;
+    var nextFolderPopAt = 0;
     var foldersOpen = 0;
+    var folderReg = [];          // {name, holder} per icon, for the auto-opener
     var deskIcons = [];          // seeded nodes, so checkStructure can re-attest them
 
     function deskLive() {
@@ -2389,7 +2399,7 @@
       [0, 0, 250, 190],
       [0, 500, 440, 620]
     ];
-    var FOLDER_BOX_W = 96, FOLDER_BOX_H = 72;   // the icon's own footprint
+    var FOLDER_BOX_W = 132, FOLDER_BOX_H = 88;  // the icon's own footprint
 
     function inKeepout(fx, fy) {
       for (var k = 0; k < FOLDER_KEEPOUT.length; k++) {
@@ -2411,8 +2421,8 @@
         // band that no keep-out touches.
         var fx = 0, fy = 0, ok = false, tries = 0;
         while (!ok && tries++ < 80) {
-          fx = 24 + rnd() * (PLAYFIELD_W - 144);
-          fy = 16 + rnd() * (PLAYFIELD_H - 110);
+          fx = 24 + rnd() * (PLAYFIELD_W - 180);
+          fy = 16 + rnd() * (PLAYFIELD_H - 130);
           if (inKeepout(fx, fy)) continue;
           ok = true;
           if (tries <= 50) {
@@ -2423,8 +2433,8 @@
           }
         }
         if (!ok) {
-          fx = 300 + rnd() * (PLAYFIELD_W - 450);
-          fy = 220 + rnd() * 180;
+          fx = 300 + rnd() * (PLAYFIELD_W - 480);
+          fy = 210 + rnd() * 170;
         }
         placed.push([fx, fy]);
         var pick = Math.floor(rnd() * names.length) % names.length;
@@ -2451,19 +2461,28 @@
       // One window per folder at a time; re-clicking while it is open only
       // costs the miss the shared handler already charged.
       var holder = { open: false };
+      folderReg.push({ name: name, holder: holder });
       on(f, 'click', function (e) {
         if (!e.isTrusted || !deskLive() || holder.open) return;
         holder.open = true;
-        openFolderWindow(name, holder);
+        openFolderWindow(name, holder, false);
       });
       return f;
     }
 
-    function openFolderWindow(name, holder) {
+    function openFolderWindow(name, holder, auto) {
       var fw = document.createElement('div');
       fw.className = 'fw';
-      fw.style.left = Math.round(8 + rnd() * (PLAYFIELD_W - FW_W - 16)) + 'px';
-      fw.style.top = Math.round(8 + rnd() * (PLAYFIELD_H - FW_H - 16)) + 'px';
+      // Parked on the chase, not in a corner: the window lands jittered around
+      // the card's current position, exactly where the player is looking. The
+      // desk layer shares the field's centring, so client coords convert by
+      // the same origin playBounds() uses.
+      var fx = x - (vw - PLAYFIELD_W) / 2 - FW_W / 2 + (rnd() * 200 - 100);
+      var fy = y - (vh - PLAYFIELD_H) / 2 - FW_H / 2 + (rnd() * 150 - 75);
+      fx = Math.min(PLAYFIELD_W - FW_W - 8, Math.max(8, fx));
+      fy = Math.min(PLAYFIELD_H - FW_H - 8, Math.max(8, fy));
+      fw.style.left = Math.round(fx) + 'px';
+      fw.style.top = Math.round(fy) + 'px';
 
       var bar = document.createElement('div');
       bar.className = 'fwbar';
@@ -2496,7 +2515,34 @@
         LOG('[AIMLAB] FOLDER CLOSED name=' + name + ' open=' + foldersOpen);
       });
       deskWins.appendChild(fw);
-      LOG('[AIMLAB] FOLDER OPENED name=' + name + ' open=' + foldersOpen);
+      LOG('[AIMLAB] FOLDER OPENED name=' + name + ' open=' + foldersOpen
+          + (auto ? ' src=auto' : ''));
+    }
+
+    /* The auto-opener's clock. Runs every frame from frame(); anything that
+       stops the desk being live -- pause, captcha, the ban screen -- also
+       resets the deadline, so a resume always gets the full grace period
+       rather than a window in the face. */
+    function folderPopTick(now) {
+      if (!deskLive() || !started) { nextFolderPopAt = 0; return; }
+      if (!nextFolderPopAt) {
+        nextFolderPopAt = now + FOLDER_POP_MIN_MS
+                        + rnd() * (FOLDER_POP_MAX_MS - FOLDER_POP_MIN_MS);
+        return;
+      }
+      if (now < nextFolderPopAt) return;
+      nextFolderPopAt = now + FOLDER_POP_MIN_MS
+                      + rnd() * (FOLDER_POP_MAX_MS - FOLDER_POP_MIN_MS);
+      var closed = [];
+      for (var i = 0; i < folderReg.length; i++) {
+        if (!folderReg[i].holder.open) closed.push(folderReg[i]);
+      }
+      if (!closed.length) return;
+      var pick = closed[Math.floor(rnd() * closed.length) % closed.length];
+      pick.holder.open = true;
+      openFolderWindow(pick.name, pick.holder, true);
+      showTaunt(TAUNT_AUTOPOP);
+      playError();
     }
 
     /* ---------------- input: press, click, keys ---------------- */
@@ -3162,6 +3208,11 @@
           refreshPause();
         }
       }
+
+      // Ahead of the pause return on purpose: deskLive() is false while paused
+      // or shielded, so the tick spends those frames resetting its deadline and
+      // a resume gets the full grace period, never a window in the face.
+      folderPopTick(t);
 
       // Paused: the picture holds, but elapsed wall time continues to count and
       // is judged as soon as the field resumes.
