@@ -19,7 +19,7 @@
   "js/chase.js": "488175a488df63d2ac700466cc7cb99b76054314e6382b1b648b538b9fc86ea3",
   "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
   "js/net.js": "227c2dc6d577cdd1ece8192a359c8f7ede66193796688e03dd3751fd70ea049b",
-  "js/main.js": "25e888ef7489fb8d821b56abf66e9a2b9af72bf502ee0de8e6eef00bbce882b8"
+  "js/main.js": "0f113f48a982a9269e60e1a16fcd9619e20f603a6349f3b2bf755b6a04c092d2"
 }
 </script>
 <style>
@@ -572,7 +572,7 @@
     text-align: left;
   }
 
-  /* Six columns do not fit a 360px phone. Rather than crush them, the track
+  /* Seven columns do not fit a 360px phone. Rather than crush them, the track
      holds its width and the pane scrolls -- also period-correct. */
   .lbhead,
   .lbbody { min-width: 428px; }
@@ -724,7 +724,9 @@
   }
 
   .lb.hide { display: none; }
-  .lb .ovcard { width: min(420px, 100%); }
+  /* 500, not 420: the details view's 428 track plus the 16px scrollbar must
+     fit the card body, or the modal pane drags a permanent sideways bar */
+  .lb .ovcard { width: min(500px, 100%); }
 
   /* V3.6: simulation is the only board there is; a caption replaced the tabs */
   .lbcap {
@@ -749,8 +751,8 @@
   .sttimecol { flex: none; width: 66px; text-align: right; }
 
   /* seven columns of the stats board's own widths; the board keeps its 428.
-     440 sits inside the window body's 450, so the desktop pane carries no
-     sideways scrollbar -- phones scroll, same as the board. */
+     440 fits the desktop pane with its vertical scrollbar up, so no sideways
+     scrollbar appears there -- phones scroll, same as the board. */
   #panelStats .lbhead,
   #panelStats .lbbody { min-width: 440px; }
 
@@ -1295,7 +1297,6 @@
   .hud .row.hide { display: none; }
 
   .hud .row.best .v { color: #004d15; }   /* 5.57:1 on #c0c0c0; #006b1f was 3.70:1 */
-  .hud .row.hide { display: none; }
 
   /* V2.7 layer H: the sus meter, styled like a Win95 tray warning. It is
      display:none until the first soft detection, so a clean run never shows it. */
@@ -2010,7 +2011,7 @@
 <div class="start" id="startScreen">
   <div class="startrow">
   <div class="startcard">
-    <div class="startbar"><img class="capicon" src="./assets/emoney.png" alt=""><span class="startbartitle">INCIDENT.EXE</span><span class="capbtns" aria-hidden="true"><span class="capbtn cmin"></span><span class="capbtn cmax"></span><span class="capbtn cx"></span></span></div>
+    <div class="startbar"><img class="capicon" src="./assets/emoney.png" alt="" width="16" height="16"><span class="startbartitle">INCIDENT.EXE</span><span class="capbtns" aria-hidden="true"><span class="capbtn cmin"></span><span class="capbtn cmax"></span><span class="capbtn cx"></span></span></div>
     <div class="startbody">
       <div class="acct" id="acct">
         <button class="w95btn twitch" id="btnLogin" type="button">Sign in with Twitch</button>
@@ -2062,7 +2063,7 @@
           </div>
           <div class="lbbody" id="boardList"></div>
         </div>
-        <div class="lbstatus" id="boardStatus"></div>
+        <div class="lbstatus" id="boardStatus" aria-live="polite"></div>
       </div>
 
       <!-- V3.8: the stats board. Every player, every public number, sortable
@@ -2081,7 +2082,7 @@
           </div>
           <div class="lbbody" id="statsList"></div>
         </div>
-        <div class="lbstatus" id="statsStatus"></div>
+        <div class="lbstatus" id="statsStatus" aria-live="polite"></div>
       </div>
       </div>
     </div>
@@ -2103,7 +2104,7 @@
     </div>
   </aside>
   </div>
-  <div class="taskbar" aria-hidden="true"><span class="startbtn"><img src="./assets/emoney.png" alt="">Start</span><span class="taskdiv"></span><span class="taskbtn on">INCIDENT.EXE</span><span class="taskbtn">EVENTVWR.EXE</span><span class="tray" id="trayClock"></span></div>
+  <div class="taskbar" aria-hidden="true"><span class="startbtn"><img src="./assets/emoney.png" alt="" width="16" height="16">Start</span><span class="taskdiv"></span><span class="taskbtn on">INCIDENT.EXE</span><span class="taskbtn">EVENTVWR.EXE</span><span class="tray" id="trayClock"></span></div>
 </div>
 
 <div class="lb hide" id="lbBox">
@@ -2123,7 +2124,7 @@
         </div>
         <div class="lbbody" id="lbList"></div>
       </div>
-      <div class="lbstatus" id="lbStatus"></div>
+      <div class="lbstatus" id="lbStatus" aria-live="polite"></div>
       <button class="w95btn lbclose" id="lbClose" type="button">Close</button>
     </div>
   </div>

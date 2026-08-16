@@ -621,8 +621,6 @@
     startScreen.classList.remove('hide');
   }
 
-  /* ---------------- V3 UI: tabs, panels, modal ---------------- */
-
   /* ==================== V3.5: activity log ============================== */
 
   var feedList = document.getElementById('feedList');
@@ -798,7 +796,11 @@
     'timeout': 'out of time'
   };
 
-  function statRow(k, v, mono) {
+  /* propStatRow, not statRow: the stats tab (V3.8) declares its own statRow
+     in this same scope, and the later declaration wins -- while both carried
+     the name, every one of these rows was built and thrown away, and the
+     Properties sheet showed an empty grid. */
+  function propStatRow(k, v, mono) {
     var a = document.createElement('span');
     a.className = 'propk';
     a.textContent = k;
@@ -884,13 +886,13 @@
        null -- not a number. Treating it as one printed "--" for every player who
        actually had a best time. */
     var best = p.best || {};
-    statRow('Best (Practice)', bestText(bestMsOf(best.practice, p.bestPractice)), true);
-    statRow('Best (Simulation)', bestText(bestMsOf(best.simulation, p.bestSimulation)), true);
-    statRow('Runs', num(runs));
-    statRow('Wins', num(wins));
-    statRow('Fails', num(fails));
-    statRow('Bird gauntlet', num(p.flappyFails));
-    statRow('Popup chase', num(p.chaseFails));
+    propStatRow('Best (Practice)', bestText(bestMsOf(best.practice, p.bestPractice)), true);
+    propStatRow('Best (Simulation)', bestText(bestMsOf(best.simulation, p.bestSimulation)), true);
+    propStatRow('Runs', num(runs));
+    propStatRow('Wins', num(wins));
+    propStatRow('Fails', num(fails));
+    propStatRow('Bird gauntlet', num(p.flappyFails));
+    propStatRow('Popup chase', num(p.chaseFails));
 
     clear(propRuns);
     var list = p.runs || [];
@@ -1054,9 +1056,11 @@
     statsPlayers.sort(function (a, b) {
       var av = a[key];
       var bv = b[key];
-      if (av === null && bv === null) return 0;
-      if (av === null) return 1;
-      if (bv === null) return -1;
+      // == null: a column the server omitted arrives undefined, not null,
+      // and must sink the same way instead of throwing in the string branch
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
       if (typeof av === 'string') return dir * av.toLowerCase().localeCompare(bv.toLowerCase());
       return dir * (av - bv);
     });
@@ -1193,17 +1197,19 @@
   /* V3.10: the taskbar clock. Decorative like the rest of the bar, but a
      tray that never ticks reads as a hang, which is the wrong joke. */
   var tray = document.getElementById('trayClock');
+
+  function tickTray() {
+    var d = new Date();
+    var h = d.getHours();
+    var m = d.getMinutes();
+    var ap = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    tray.textContent = h + ':' + (m < 10 ? '0' + m : m) + ' ' + ap;
+  }
+
   if (tray) {
-    var tickTray = function () {
-      var d = new Date();
-      var h = d.getHours();
-      var m = d.getMinutes();
-      var ap = h >= 12 ? 'PM' : 'AM';
-      h = h % 12 || 12;
-      tray.textContent = h + ':' + (m < 10 ? '0' + m : m) + ' ' + ap;
-    };
     tickTray();
-    setInterval(tickTray, 15000);
+    window.setInterval(tickTray, 15000);
   }
 
   if (mode === 'practice') startPractice();
