@@ -463,8 +463,12 @@
         return;
       }
       if (r.refused) {
-        // the server refused it and said why; passing that on beats inventing an outage
-        chase.winExtras({ note: r.message || 'Score not accepted by the server.' });
+        /* The server refused it and said why; passing that on beats inventing an
+           outage. The code rides along in brackets so a refusal can be reported
+           and looked up exactly, rather than paraphrased from memory. */
+        var why = r.message || 'Score not accepted by the server.';
+        if (r.error) why += '   [' + r.error + ']';
+        chase.winExtras({ note: why });
         return;
       }
       var note = (r.improved ? 'New record.   ' : '') + 'Rank #' + r.rank;

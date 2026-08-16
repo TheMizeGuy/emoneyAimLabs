@@ -63,8 +63,13 @@ const STATUS_BY_CODE = Object.freeze({
   run_closed: 409,
 });
 
-// Deliberately vague (V3.3 rule 7): an error says what the caller did wrong in
-// game terms and never echoes a threshold, a stored value or an internal.
+/* Every message names WHICH check refused the score and what the player would
+   have to do differently, in game terms. What it still never echoes (V3.3 rule
+   7) is the threshold itself, a stored value, or anything internal: "your run
+   was shorter than this mode's minimum" is diagnosable, "shorter than 2000 ms"
+   hands a forger the number to beat. The machine-readable code travels beside
+   the message, and the client prints it, so a refusal can be reported exactly
+   rather than described. */
 const MESSAGE_BY_CODE = Object.freeze({
   invalid_body: 'Malformed request body',
   invalid_run_id: 'Malformed run id',
@@ -75,18 +80,18 @@ const MESSAGE_BY_CODE = Object.freeze({
   player_not_found: 'No such player',
   invalid_attestation: 'Missing or malformed run attestation',
   invalid_signature: 'Run attestation did not verify',
-  chain_invalid: 'Heartbeat chain broken',
-  chase_not_started: 'That run never reached the chase',
-  flappy_phase_too_short: 'That gauntlet was not played',
-  run_expired: 'That run is too old to score',
-  time_exceeds_elapsed: 'Claimed time is longer than the run has existed',
-  insufficient_liveness: 'That run was not held open long enough to be real',
-  below_floor: 'Faster than this mode allows',
-  above_sim_ceiling: 'Simulation runs cannot exceed the shot clock',
-  time_out_of_range: 'Time is outside the accepted range',
-  stats_out_of_range: 'Counters are outside the accepted range',
-  implausible_stats: 'Those counters do not describe a real win',
-  client_flagged: 'The game reported interference during that run',
+  chain_invalid: 'The heartbeats that prove a run is being played did not line up',
+  chase_not_started: 'That run never reached the popup chase',
+  flappy_phase_too_short: 'The bird gauntlet was skipped rather than played',
+  run_expired: 'That run sat unscored for too long to be trusted',
+  time_exceeds_elapsed: 'The time claimed is longer than the run has existed',
+  insufficient_liveness: 'That run was not held open long enough to have been played',
+  below_floor: 'That time is below the fastest this mode can honestly be finished',
+  above_sim_ceiling: 'That time is longer than the simulation shot clock allows',
+  time_out_of_range: 'The time submitted is not a number this game can produce',
+  stats_out_of_range: 'The click and miss counters are not numbers this game can produce',
+  implausible_stats: 'The clicks, misses and near misses do not add up to that win',
+  client_flagged: 'The game flagged interference during that run, so it was not counted',
   run_not_found: 'No such run',
   run_consumed: 'That run has already been scored',
   run_closed: 'That run was already closed as abandoned',

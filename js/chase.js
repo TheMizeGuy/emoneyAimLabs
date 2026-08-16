@@ -223,7 +223,8 @@
     '<div class="ovbody">',
     '<div class="errrow">',
     '<span class="erricon" aria-hidden="true"></span>',
-    '<p class="errtext">This window is too small to run away in.<br>Make the browser bigger to carry on.</p>',
+    '<p class="errtext"><span data-el="pauseL1">This window is too small to run away in.</span><br>',
+    '<span data-el="pauseL2">Make the browser bigger to carry on.</span></p>',
     '</div>',
     '<p class="errsub">Paused. The clock is not running.</p>',
     '</div>',
@@ -337,6 +338,47 @@
        speed with no accumulated approach velocity to dodge against. */
     var WAKE_MS    = 500;    // how long the wake-up shove lasts after a resume
     var WAKE_ACCEL = 9000;   // px/s^2 straight away from the cursor
+
+    /* V3.9 -- the arming gate. Two ways a run could be won while the engine was
+       not defending itself, both seen live on launch night:
+
+         1. THE SPAWN GRAB. The card materialised dead centre with zero velocity
+            while hasPointer was still false -- and hasPointer is the master
+            switch for the entire flee block -- directly under a cursor that had
+            just clicked a centred mode button. One wiggle to satisfy presence,
+            then a spam-click took it before the physics had ever run.
+         2. THE BLUR PARK. Unfocusing the page dropped the pointer, so the card
+            stopped fleeing and idled at wander speed. The player lined the
+            cursor up on the drifting X and clicked; on macOS that single click
+            refocuses the window AND passes through to the page, so the press
+            landed against a target that had spent the whole approach asleep.
+
+       Both are the same hole, so both get the same answer: the X is ARMED, not
+       merely present. Arming restarts every time the playfield becomes live
+       again -- run start, pause exit, captcha resume -- and until it finishes
+       the X cannot be won. It costs a miss and a taunt but never a sus point:
+       clicking a sleeping engine is bad play, not tampering. */
+    var ARM_MS     = 700;    // the field must have been live this long...
+    var ARM_FRAMES = 12;     // ...and rendered this many frames...
+                             // ...and seen a trusted move since it woke (see armed()).
+    var ARM_CLEAR  = 300;    // px of clearance the card takes when it wakes up
+
+    /* V3.9 -- the spam gate, and the reason the arming gate alone was not enough.
+       Measured on the launch-night exploit: 30 presses in 515 ms, every one of
+       them re-aimed at the X's live position -- about 58 clicks a second. Arming
+       only moved that to 755 ms, because the attacker simply kept clicking until
+       the window expired. The distinguishing signal is not WHERE the press
+       landed, it is the cadence: a hand spamming flat out manages 10-15 clicks a
+       second, an elite butterfly-clicker maybe 20, and an autoclicker or a
+       scripted pursuit loop runs three times that.
+
+       So the cadence bounds the WIN, not the play: you may click as fast as you
+       like, but the press that closes the window has to have arrived at a speed
+       a hand could produce. Deliberately generous -- refusing costs a miss and a
+       taunt but never a sus point, because a fast mouse is not a confession. */
+    var CLICK_MIN_GAP_MS    = 55;    // a win this soon after the previous press is not a hand
+    var CLICK_WINDOW_MS     = 1000;
+    var CLICK_MAX_IN_WINDOW = 16;    // sustained presses/second a hand can really make
     var BOUNCE_JITTER      = 10 * Math.PI / 180;
     var PANIC_MS           = 260;
     var PANIC_ACCEL        = 5000;                                              // (v2 4000)
@@ -455,6 +497,8 @@
     var TAUNT_TOUCH    = 'Fingers do not close this one. A mouse does.';
     var TAUNT_TELEPORT = 'That cursor did not travel. Move the mouse like a person.';
     var TAUNT_CAMP     = 'Camping is not aiming. Go and get it.';
+    var TAUNT_ARMING   = 'He is not even awake yet. Wait for him.';
+    var TAUNT_SPAM     = 'That is a macro, not a hand. Aim once instead.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
 
@@ -542,6 +586,8 @@
     var elOvSusNote = el('ovSusNote');
     var cheatText = el('cheatText');
     var pauseBox  = el('pauseBox');
+    var pauseL1   = el('pauseL1');
+    var pauseL2   = el('pauseL2');
     var capBox    = el('capBox');
     var capScene  = el('capScene');
     var capCanvas = el('capCanvas');
@@ -697,6 +743,14 @@
 
     // ruling 3: too small a viewport pauses the run behind a dialog
     var paused = false, pauseAt = 0, pauseWall = 0, pauseWall2 = 0;
+    /* Two independent reasons to hold the run. Kept apart so that resizing the
+       window while it is unfocused cannot resume a run nobody is looking at,
+       and vice versa: the field is live only when BOTH are clear. */
+    var pauseSmall = false, pauseUnfocused = false;
+    // When the playfield last became live. The arming gate reads it (V3.9).
+    var armAt = -1e9, armFrame = -1e9;
+    // Trusted press timestamps inside CLICK_WINDOW_MS, for the spam gate (V3.9).
+    var pressTimes = [];
 
     // B5: the rAF id namespace is page-global, so the loop needs a heartbeat
     var watchdog = 0;
@@ -910,6 +964,9 @@
     function startTimer() {
       if (started || won) return;
       started = true;
+      // V3.9: the run begins armed-but-not-yet-winnable, and the card takes its
+      // clearance from wherever the cursor that pressed the mode button is.
+      arm();
       shStartT.set(NOW());
       startWall = WALL();
       startWall2 = wall2();
@@ -1510,7 +1567,9 @@
       if (!shieldSeen) return;
       setPointer(shieldX, shieldY, now);        // hasPointer = true, same frame
       campX = shieldX; campY = shieldY; campAt = now; cursorParked = false;
-      wakeUntil = now + WAKE_MS;
+      // V3.9: arm() carries the wake shove now, and adds the clearance and the
+      // winnability gate a hostile resume wants just as much as a fresh run.
+      arm();
     }
 
     /* V2.14. A failed verification ends the run: the audio stops, the captcha
@@ -1803,6 +1862,10 @@
     function leavePause() {
       if (!paused) return;
       paused = false;
+      /* V3.9: coming back from a pause is exactly the situation the arming gate
+         exists for -- most of all the unfocused one, where the very click that
+         restores focus also lands on the page. */
+      arm();
       pauseBox.classList.add('hide');
       // Every clock the engine keeps skips the paused interval, so a pause can
       // neither pad a time nor read as drift when the run continues.
@@ -1819,9 +1882,77 @@
       lastT = NOW();
     }
 
-    function checkPlayable() {
+    /* One resolver for both reasons. The dialog says which one is holding the
+       run, so an unfocused pause never reads as a window-size complaint. */
+    function refreshPause() {
       if (won || stopped) return;
-      if (playable()) leavePause(); else enterPause();
+      pauseSmall = !playable();
+      if (pauseSmall || pauseUnfocused) {
+        if (pauseSmall) {
+          setText(pauseL1, 'This window is too small to run away in.');
+          setText(pauseL2, 'Make the browser bigger to carry on.');
+        } else {
+          setText(pauseL1, 'He does not perform for an empty room.');
+          setText(pauseL2, 'Click back into the window to carry on.');
+        }
+        enterPause();
+        return;
+      }
+      leavePause();
+    }
+
+    function checkPlayable() { refreshPause(); }
+
+    /* V3.9. Wakes the playfield: restarts the arming clock and shoves the card
+       clear of wherever the cursor was last seen, so a run never begins -- and
+       never resumes -- with the X sitting under a waiting pointer. The shove is
+       the same WAKE the captcha resume uses, plus a one-off displacement when
+       the card is already inside the clearance radius, because acceleration
+       alone cannot undo a zero-distance start. */
+    function arm() {
+      var now = NOW();
+      armAt = now;
+      armFrame = framesRun;
+      wakeUntil = now + WAKE_MS;
+
+      // Idle wander speed from the first frame: a stationary spawn was half the
+      // spawn grab, since the card had to accelerate from nothing.
+      if ((vx * vx + vy * vy) < 1) {
+        vx = Math.cos(heading) * BASE_SPEED;
+        vy = Math.sin(heading) * BASE_SPEED;
+      }
+      if (!hasPointer) return;
+
+      var dx = x - px, dy = y - py;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (d >= ARM_CLEAR) return;
+      if (d < 1e-6) { dx = Math.cos(heading); dy = Math.sin(heading); d = 1; }
+      var ux = dx / d, uy = dy / d;
+      // Move to the clearance ring, then let the wall clamp put it back in play.
+      x = px + ux * ARM_CLEAR;
+      y = py + uy * ARM_CLEAR;
+      clampIntoView();
+      var s = Math.sqrt(vx * vx + vy * vy);
+      if (s < BASE_SPEED) { vx = ux * BASE_SPEED; vy = uy * BASE_SPEED; }
+    }
+
+    /* The X is winnable only once the field has been live long enough to have
+       actually defended itself: real time, rendered frames, and a trusted move
+       made SINCE it woke. The last clause is the one that stops a refocusing
+       click, whose pointer evidence all predates the resume. */
+    function armed() {
+      return (NOW() - armAt) >= ARM_MS
+          && (framesRun - armFrame) >= ARM_FRAMES
+          && moveT > armAt;
+    }
+
+    /* True when the press that is about to win arrived at a rate a hand could
+       produce: not on the heels of the previous one, and not out of a burst
+       that has been running faster than a hand all second. */
+    function cadenceOK() {
+      var n = pressTimes.length;
+      if (n >= 2 && (pressTimes[n - 1] - pressTimes[n - 2]) < CLICK_MIN_GAP_MS) return false;
+      return n <= CLICK_MAX_IN_WINDOW;
     }
 
     function render() {
@@ -1881,10 +2012,23 @@
       nearInside = false;
     }
 
+    /* V3.9. Losing focus used to just drop the pointer, which disarmed the whole
+       flee block and left the card idling for anyone who wanted to line up on it
+       from outside the window. An unfocused playfield is now a PAUSED one: the
+       clock stops (so nothing is gained by it), the X goes inert, and coming
+       back re-arms. Still no accusation -- alt-tabbing is not cheating. */
     function onBlur(e) {
       if (e && e.isTrusted === false) return;
       if (document.hasFocus && document.hasFocus()) return;
       dropPointer();
+      pauseUnfocused = true;
+      refreshPause();
+    }
+
+    function onFocus(e) {
+      if (e && e.isTrusted === false) return;
+      pauseUnfocused = false;
+      refreshPause();
     }
 
     on(window, 'pointermove', function (e) {
@@ -1911,6 +2055,12 @@
       }
       setPointer(e.clientX, e.clientY, NOW());
       if (!e.isTrusted) return;
+      /* V3.9: every trusted press is remembered, wherever it landed -- the spam
+         gate measures the hand, and a pursuit loop misses far more than it hits,
+         so counting only the presses that found the X would measure nothing. */
+      var pt = NOW();
+      pressTimes.push(pt);
+      while (pressTimes.length && (pt - pressTimes[0]) > CLICK_WINDOW_MS) pressTimes.shift();
       // which device is behind the click that is about to be judged (V2.7 item 1)
       lastPointerType = e.pointerType || '';
       if (e.pointerType === 'touch' || e.pointerType === 'pen') sawTouch = true;
@@ -1919,6 +2069,13 @@
 
     on(document, 'pointerleave', dropPointer);
     on(window, 'blur', onBlur);
+    on(window, 'focus', onFocus);
+    // A tab switch does not always deliver blur; visibility always changes.
+    on(document, 'visibilitychange', function () {
+      if (document.hidden) { dropPointer(); pauseUnfocused = true; }
+      else if (document.hasFocus && document.hasFocus()) pauseUnfocused = false;
+      refreshPause();
+    });
 
     on(window, 'touchstart', function (e) {
       var t0 = e.touches[0];
@@ -2089,6 +2246,19 @@
             showTaunt(TAUNT_TELEPORT);
             addMiss('teleport');
             sus('teleport');
+            return;
+          }
+          /* V3.9. Last gate before the win: the field has to have been awake and
+             defending. Costs a miss, never a sus point -- see the ARM_* block. */
+          if (!armed()) {
+            showTaunt(TAUNT_ARMING);
+            addMiss('unarmed');
+            return;
+          }
+          // V3.9: and it has to be a hand doing the clicking. See the CLICK_* block.
+          if (!cadenceOK()) {
+            showTaunt(TAUNT_SPAM);
+            addMiss('clickspam');
             return;
           }
           win();
@@ -2542,6 +2712,20 @@
 
       var dtMs = t - lastT;
       lastT = t;
+
+      /* V3.9 backstop. A blur event can be missed -- another window taking focus
+         on some window managers, a click-through that focuses and clicks in the
+         same gesture -- so the loop checks the truth every frame. rAF keeps
+         running for a visible-but-unfocused window, which is exactly the case
+         the blur park relied on. */
+      if (document.hasFocus) {
+        var hasIt = document.hasFocus();
+        if (hasIt === pauseUnfocused) {      // disagreement with what we believe
+          if (!hasIt) dropPointer();
+          pauseUnfocused = !hasIt;
+          refreshPause();
+        }
+      }
 
       // Paused: the picture holds, the clock holds, and nothing is judged.
       if (paused) return;
