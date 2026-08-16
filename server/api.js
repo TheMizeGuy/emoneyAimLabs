@@ -29,6 +29,7 @@ const BEAT_LIMIT = 30;
 const EVENT_LIMIT = 30;
 const LEADERBOARD_RATE_LIMIT = 60;
 const PLAYER_RATE_LIMIT = 60;
+const STATS_RATE_LIMIT = 30;
 const FEED_RATE_LIMIT = 10;
 // Not in the published contract: a legitimate client opens one run per chase,
 // so this only ever bites a script spamming run tokens.
@@ -149,6 +150,9 @@ function createApiRouter(deps) {
   const playerLimit = rateLimit(
     limiter, (req) => `player:${req.ip}`, PLAYER_RATE_LIMIT, MINUTE_MS, recorder.note,
   );
+  const statsLimit = rateLimit(
+    limiter, (req) => `stats:${req.ip}`, STATS_RATE_LIMIT, MINUTE_MS, recorder.note,
+  );
   const feedLimit = rateLimit(
     limiter, (req) => `feed:${req.ip}`, FEED_RATE_LIMIT, MINUTE_MS, recorder.note,
   );
@@ -240,12 +244,9 @@ function createApiRouter(deps) {
     await streamFailures(await store.failOpenRunsForUser(user.id));
 
     const runId = await store.createRun(user.id, parsed.value.mode, nowDate);
-    feed.emit('run_started', {
-      twitchId: user.id,
-      name: user.displayName,
-      avatar: user.avatarUrl,
-      mode: parsed.value.mode,
-    });
+    // V3.8: run starts deliberately do NOT stream. Every start either becomes
+    // a win or a failure, both of which do -- announcing the start too said
+    // everything twice and drowned the lines that carry information.
     res.setHeader('Cache-Control', 'no-store');
     return res.json({
       runId,
@@ -529,6 +530,15 @@ function createApiRouter(deps) {
         at: run.at.toISOString(),
       })),
     });
+  }));
+
+  // V3.8: the stats board. One read across every player, made of fields the
+  // leaderboard and player cards already expose one at a time. Sorting is
+  // client-side; the cap and default order live in the store.
+  router.get('/stats', statsLimit, asyncRoute(async (req, res) => {
+    const players = await store.allPlayerStats();
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ players });
   }));
 
   // Public live feed. No auth, no cookies, no writes: everything on it is

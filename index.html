@@ -18,8 +18,8 @@
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
   "js/chase.js": "81a6c31c6a5786f3ed1fcf44dec394c108b876ab08f967db1f49391aceea0804",
   "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
-  "js/net.js": "16845fa8232faa0bbedc81c3bdb82fd3caf7ab9958f4f0e5e6be3fe3fdc5c7b3",
-  "js/main.js": "55580d78afb1f92dd5e6ff3d32a2a9a773ac1762f8fd3d34b0c7e60becb62655"
+  "js/net.js": "227c2dc6d577cdd1ece8192a359c8f7ede66193796688e03dd3751fd70ea049b",
+  "js/main.js": "ef5e3fff803884195f72b6174149815c7f3524a3f86be4bd184876dee53380fa"
 }
 </script>
 <style>
@@ -582,6 +582,31 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: #3d3d3d;
+  }
+
+  /* V3.8: the stats board's sortable column headers. Same details-view look;
+     each header is a live button and the active one wears its direction. */
+  .stname   { flex: 1 1 auto; min-width: 92px; text-align: left; }
+  .stnumcol { flex: none; width: 46px; text-align: right; }
+  .sttimecol { flex: none; width: 58px; text-align: right; }
+
+  .stsort {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+  }
+
+  .stsort:hover { text-decoration: underline; }
+  .stsort:focus-visible { outline: 1px dotted #000; }
+
+  .lbrow .stnum {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    text-align: right;
   }
 
   /* The details view above is shared by both mounts -- the modal reuses it
@@ -1760,6 +1785,7 @@
       <div class="tabstrip">
         <button class="tab on" id="tabGame" type="button">GAME</button>
         <button class="tab" id="tabBoard" type="button">LEADERBOARD</button>
+        <button class="tab" id="tabStats" type="button">STATS</button>
       </div>
 
       <div class="panel" id="panelGame">
@@ -1796,6 +1822,25 @@
           <div class="lbbody" id="boardList"></div>
         </div>
         <div class="lbstatus" id="boardStatus"></div>
+      </div>
+
+      <!-- V3.8: the stats board. Every player, every public number, sortable
+           by clicking a column header the way Explorer's details view sorted. -->
+      <div class="panel hide" id="panelStats">
+        <p class="lbcap">Click a column to sort</p>
+        <div class="lblist">
+          <div class="lbhead">
+            <button class="lbcol stsort stname" data-key="displayName" data-label="PLAYER" type="button">PLAYER</button>
+            <button class="lbcol stsort stnumcol" data-key="wins" data-label="WINS" type="button">WINS</button>
+            <button class="lbcol stsort stnumcol" data-key="flappyFails" data-label="BIRD" type="button">BIRD</button>
+            <button class="lbcol stsort stnumcol" data-key="chaseFails" data-label="POPUP" type="button">POPUP</button>
+            <button class="lbcol stsort stnumcol" data-key="totalFails" data-label="FAILS" type="button">FAILS</button>
+            <button class="lbcol stsort sttimecol" data-key="bestPracticeMs" data-label="PRAC" type="button">PRAC</button>
+            <button class="lbcol stsort sttimecol" data-key="bestSimMs" data-label="SIM" type="button">SIM</button>
+          </div>
+          <div class="lbbody" id="statsList"></div>
+        </div>
+        <div class="lbstatus" id="statsStatus"></div>
       </div>
     </div>
   </div>

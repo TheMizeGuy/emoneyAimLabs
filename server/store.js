@@ -18,6 +18,8 @@ const RUN_STALE_MS = 90 * 1000;
 const REJECTION_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // Feed events kept beyond the replay window, so the prune never races a read.
 const FEED_RETENTION = 500;
+// The stats board shows at most this many players in one response.
+const STATS_LIMIT = 200;
 
 const UNIQUE_VIOLATION = '23505';
 const CHECK_VIOLATION = '23514';
@@ -588,6 +590,39 @@ function createStore(pool) {
     }));
   }
 
+  // V3.8: the stats board. Every signed-in player who ever ran, with the same
+  // public fields the leaderboard and player card already show -- nothing new
+  // leaves the building, it is just all in one place. Sorting is the client's
+  // job; the order here only decides who makes the cut at the cap.
+  async function allPlayerStats(limit = STATS_LIMIT) {
+    const { rows } = await pool.query(
+      `SELECT u.twitch_id, u.display_name, u.avatar_url,
+              u.flappy_fails, u.chase_fails, u.runs_failed_total,
+              p.time_ms AS best_practice_ms,
+              s.time_ms AS best_sim_ms,
+              COALESCE(w.n, 0) AS wins
+       FROM users u
+       LEFT JOIN scores p ON p.user_id = u.twitch_id AND p.mode = 'practice'
+       LEFT JOIN scores s ON s.user_id = u.twitch_id AND s.mode = 'simulation'
+       LEFT JOIN (SELECT user_id, COUNT(*) AS n FROM score_submissions GROUP BY user_id) w
+              ON w.user_id = u.twitch_id
+       ORDER BY u.runs_failed_total DESC, u.twitch_id ASC
+       LIMIT $1`,
+      [limit],
+    );
+    return rows.map((row) => ({
+      userId: row.twitch_id,
+      displayName: row.display_name,
+      avatarUrl: row.avatar_url,
+      flappyFails: Number(row.flappy_fails || 0),
+      chaseFails: Number(row.chase_fails || 0),
+      totalFails: Number(row.runs_failed_total || 0),
+      wins: Number(row.wins || 0),
+      bestPracticeMs: row.best_practice_ms === null ? null : Number(row.best_practice_ms),
+      bestSimMs: row.best_sim_ms === null ? null : Number(row.best_sim_ms),
+    }));
+  }
+
   // V3.7: the feed's replay buffer, persisted so a deploy does not empty the
   // activity log. Writes are fire-and-forget from the feed's point of view;
   // the prune keeps the table at roughly the retention cap and nothing more.
@@ -640,6 +675,7 @@ function createStore(pool) {
     incrementFlappyFails,
     saveFeedEvent,
     recentFeedEvents,
+    allPlayerStats,
   };
 }
 

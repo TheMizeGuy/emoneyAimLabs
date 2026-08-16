@@ -948,16 +948,9 @@ test('run creation closes the previous run and streams the failure', async (t) =
     phase: 'flappy',
   });
 
-  const started = stream.of('run_started');
-  assert.equal(started.length, 2);
-  const { at: startedAt, ...startedData } = started[0].data;
-  assert.equal(typeof startedAt, 'number');
-  assert.deepEqual(startedData, {
-    twitchId: '1',
-    name: 'PLAYER',
-    avatar: 'https://cdn.test/player.png',
-    mode: 'simulation',
-  });
+  // Run starts deliberately never stream (V3.8): the win or the failure that
+  // follows says it better.
+  assert.equal(stream.of('run_started').length, 0);
 });
 
 test('an abandoned run is swept into a failure and streamed with its phase', async (t) => {
@@ -1179,9 +1172,8 @@ test('the live feed streams over SSE and survives a disconnect', async (t) => {
   // The connection preamble arrives before anything happens.
   assert.ok(await readUntil('retry:'), 'the stream opens with a retry hint');
 
-  await client.post('/api/run', { mode: 'practice' });
-  assert.ok(await readUntil('event: run_started'), `saw: ${buffer}`);
-  assert.match(buffer, /"mode":"practice"/);
+  await client.post('/api/event', { type: 'flappy_death' });
+  assert.ok(await readUntil('event: flappy_death'), `saw: ${buffer}`);
   assert.match(buffer, /"name":"PLAYER"/);
   // The id survives serialisation over the wire, not just the in-process sink.
   assert.match(buffer, /"twitchId":"1"/);
@@ -1192,6 +1184,40 @@ test('the live feed streams over SSE and survives a disconnect', async (t) => {
   assert.equal(ctx.feed.size(), 0);
 });
 
+test('the stats board lists every player with their public numbers', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'winner');
+  await ctx.seedUser('2', 'faller');
+  const winner = ctx.clientFor('1');
+
+  await playRun(ctx, winner, 'practice', 20000, { misses: 5, nearMisses: 4 });
+  await ctx.clientFor('2').post('/api/event', { type: 'flappy_death' });
+
+  const response = await ctx.makeClient().get('/api/stats');
+  assert.equal(response.status, 200);
+  const { players } = response.json;
+  assert.equal(players.length, 2);
+
+  const won = players.find((p) => p.userId === '1');
+  assert.equal(won.displayName, 'WINNER');
+  assert.equal(won.wins, 1);
+  assert.equal(won.bestPracticeMs, 20000);
+  assert.equal(won.bestSimMs, null);
+  assert.equal(won.totalFails, 0);
+
+  const fell = players.find((p) => p.userId === '2');
+  assert.equal(fell.flappyFails, 1);
+  assert.equal(fell.wins, 0);
+  assert.equal(fell.bestPracticeMs, null);
+
+  // Only board-public fields travel: no login, no epochs, nothing internal.
+  assert.deepEqual(Object.keys(won).sort(), [
+    'avatarUrl', 'bestPracticeMs', 'bestSimMs', 'chaseFails', 'displayName',
+    'flappyFails', 'totalFails', 'userId', 'wins',
+  ]);
+});
+
 test('the feed replays recent history on connect and ?after narrows it', async (t) => {
   const ctx = await createContext();
   t.after(() => ctx.close());
@@ -1199,7 +1225,7 @@ test('the feed replays recent history on connect and ?after narrows it', async (
   const client = ctx.clientFor('1');
 
   // Two events happen while nobody at all is watching.
-  await client.post('/api/run', { mode: 'practice' });
+  await client.post('/api/event', { type: 'flappy_death' });
   await client.post('/api/event', { type: 'flappy_death' });
 
   async function connectAndRead(query, marker) {
@@ -1223,20 +1249,20 @@ test('the feed replays recent history on connect and ?after narrows it', async (
   }
 
   // A cold connect gets the whole recent past, oldest first, stamped.
-  const cold = await connectAndRead('', 'event: flappy_death');
-  assert.match(cold, /id: 1\nevent: run_started/);
+  const cold = await connectAndRead('', 'id: 2');
+  assert.match(cold, /id: 1\nevent: flappy_death/);
   assert.match(cold, /id: 2\nevent: flappy_death/);
-  assert.ok(cold.indexOf('run_started') < cold.indexOf('flappy_death'));
+  assert.ok(cold.indexOf('id: 1') < cold.indexOf('id: 2'));
   assert.match(cold, /"at":\d+/);
 
   // A reconnect that already saw line 1 gets only the gap.
-  const warm = await connectAndRead('?after=1', 'event: flappy_death');
-  assert.ok(!warm.includes('event: run_started'), `saw: ${warm}`);
+  const warm = await connectAndRead('?after=1', 'id: 2');
+  assert.ok(!warm.includes('id: 1\n'), `saw: ${warm}`);
   assert.match(warm, /id: 2\nevent: flappy_death/);
 
   // Junk cursors mean "from the top", never an error.
-  const junk = await connectAndRead('?after=banana', 'event: flappy_death');
-  assert.match(junk, /id: 1\nevent: run_started/);
+  const junk = await connectAndRead('?after=banana', 'id: 2');
+  assert.match(junk, /id: 1\nevent: flappy_death/);
 });
 
 test('feed connections are capped and rate limited', async (t) => {

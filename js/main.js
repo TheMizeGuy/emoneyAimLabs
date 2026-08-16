@@ -629,15 +629,11 @@
      sentences deliberately name the SEGMENT the run died in, because "failed"
      on its own tells a spectator nothing. */
   var FEED_ICON = {
-    run_started: ['fi-i', 'i'],
+    fallback: ['fi-i', 'i'],
     run_won: ['fi-win', '*'],
     run_failed: ['fi-e', 'x'],
     flappy_death: ['fi-w', '!']
   };
-
-  function modeWord(m) {
-    return (m === 'simulation') ? 'SIMULATION' : 'PRACTICE';
-  }
 
   function secs(ms) {
     if (typeof ms !== 'number' || !isFinite(ms) || ms < 0) return '?';
@@ -659,7 +655,6 @@
   }
 
   function feedWords(type, d) {
-    if (type === 'run_started') return 'started ' + modeWord(d.mode);
     if (type === 'run_won') {
       var t = 'closed the window in ' + secs(d.timeMs);
       if (typeof d.clicks === 'number') t += ' (' + d.clicks + ' click' + (d.clicks === 1 ? '' : 's') + ')';
@@ -700,7 +695,7 @@
     var empty = feedList.querySelector('.feedempty');
     if (empty) feedList.removeChild(empty);
 
-    var icon = FEED_ICON[type] || FEED_ICON.run_started;
+    var icon = FEED_ICON[type] || FEED_ICON.fallback;
     /* an abandon is not an error; soften the badge to match the wording */
     if (type === 'run_failed' && !d.reason) icon = FEED_ICON.flappy_death;
 
@@ -965,13 +960,114 @@
   var lbStatus = document.getElementById('lbStatus');
   var lbClose = document.getElementById('lbClose');
 
+  var tabStats = document.getElementById('tabStats');
+  var panelStats = document.getElementById('panelStats');
+  var statsList = document.getElementById('statsList');
+  var statsStatus = document.getElementById('statsStatus');
+
   function showTab(which) {
     var board = (which === 'board');
-    tabGame.classList.toggle('on', !board);
+    var stats = (which === 'stats');
+    tabGame.classList.toggle('on', !board && !stats);
     tabBoard.classList.toggle('on', board);
-    panelGame.classList.toggle('hide', board);
+    tabStats.classList.toggle('on', stats);
+    panelGame.classList.toggle('hide', board || stats);
     panelBoard.classList.toggle('hide', !board);
+    panelStats.classList.toggle('hide', !stats);
     if (board) renderBoard(boardList, 'simulation', boardStatus);
+    if (stats) loadStats();
+  }
+
+  /* ---------------- V3.8: the stats board ----------------
+     One fetch per tab visit, then every sort is a client-side re-render of
+     the same array. Rows with no time in a time column sink to the bottom
+     whichever way the sort points -- "never played" is not a ranking. */
+
+  var statsPlayers = null;
+  var statsSort = { key: 'wins', dir: -1 };   // winners first, out of the box
+
+  function statCell(text, cls) {
+    var el = document.createElement('span');
+    el.className = cls + ' stnum';
+    el.textContent = text;
+    return el;
+  }
+
+  function statRow(p) {
+    var row = document.createElement('div');
+    row.className = 'lbrow';
+
+    var nameCell = document.createElement('span');
+    nameCell.className = 'lbname';
+    var av = document.createElement('img');
+    av.className = 'lbav';
+    av.alt = '';
+    av.width = 16;
+    av.height = 16;
+    if (p.avatarUrl) av.src = p.avatarUrl;
+    nameCell.appendChild(av);
+    var nm = nameEl(p.displayName, p.userId);
+    nm.className += (nm.className ? ' ' : '') + 'lbnametext';
+    nameCell.appendChild(nm);
+    row.appendChild(nameCell);
+
+    row.appendChild(statCell(num(p.wins), 'stnumcol'));
+    row.appendChild(statCell(num(p.flappyFails), 'stnumcol'));
+    row.appendChild(statCell(num(p.chaseFails), 'stnumcol'));
+    row.appendChild(statCell(num(p.totalFails), 'stnumcol'));
+    row.appendChild(statCell(typeof p.bestPracticeMs === 'number' ? secs(p.bestPracticeMs) : '--', 'sttimecol'));
+    row.appendChild(statCell(typeof p.bestSimMs === 'number' ? secs(p.bestSimMs) : '--', 'sttimecol'));
+    return row;
+  }
+
+  function paintStatsHead() {
+    var btns = panelStats.querySelectorAll('.stsort');
+    for (var i = 0; i < btns.length; i++) {
+      var on = btns[i].getAttribute('data-key') === statsSort.key;
+      btns[i].textContent = btns[i].getAttribute('data-label')
+        + (on ? (statsSort.dir < 0 ? ' ▼' : ' ▲') : '');
+    }
+  }
+
+  function renderStats() {
+    if (!statsPlayers) return;
+    var key = statsSort.key;
+    var dir = statsSort.dir;
+    statsPlayers.sort(function (a, b) {
+      var av = a[key];
+      var bv = b[key];
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      if (typeof av === 'string') return dir * av.toLowerCase().localeCompare(bv.toLowerCase());
+      return dir * (av - bv);
+    });
+    paintStatsHead();
+    clear(statsList);
+    if (!statsPlayers.length) {
+      var none = document.createElement('p');
+      none.className = 'lbempty';
+      none.textContent = 'Nobody has signed in and played yet.';
+      statsList.appendChild(none);
+    }
+    for (var i = 0; i < statsPlayers.length; i++) statsList.appendChild(statRow(statsPlayers[i]));
+    setStatus(statsStatus, statsPlayers.length + ' object' + (statsPlayers.length === 1 ? '' : 's'));
+  }
+
+  function loadStats() {
+    if (!statsList) return;
+    if (statsPlayers) { renderStats(); }   // stale is fine while the refresh runs
+    if (!NET) { clear(statsList); offlineInto(statsList, statsStatus); return; }
+    setStatus(statsStatus, 'Working...');
+    NET.stats().then(function (d) {
+      var players = d && d.players;
+      if (!players) {
+        if (!statsPlayers) { clear(statsList); offlineInto(statsList, statsStatus); }
+        return;
+      }
+      statsPlayers = players;
+      renderStats();
+    });
   }
 
   // the modal, used by the win dialog's View leaderboard button
@@ -983,6 +1079,22 @@
   if (tabGame) {
     tabGame.addEventListener('click', function () { showTab('game'); });
     tabBoard.addEventListener('click', function () { showTab('board'); });
+    tabStats.addEventListener('click', function () { showTab('stats'); });
+  }
+  if (panelStats) {
+    panelStats.addEventListener('click', function (ev) {
+      var t = ev.target;
+      while (t && t !== panelStats && !(t.getAttribute && t.getAttribute('data-key'))) t = t.parentNode;
+      if (!t || t === panelStats) return;
+      var key = t.getAttribute('data-key');
+      if (statsSort.key === key) {
+        statsSort.dir = -statsSort.dir;
+      } else {
+        // Names read forward and times rank fastest-first; counts rank most-first.
+        statsSort = { key: key, dir: (key === 'displayName' || key.indexOf('best') === 0) ? 1 : -1 };
+      }
+      renderStats();
+    });
   }
   if (lbBox) {
     lbClose.addEventListener('click', function () { lbBox.classList.add('hide'); });

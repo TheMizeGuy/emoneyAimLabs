@@ -255,6 +255,11 @@
     return call('GET', '/api/leaderboard?mode=' + encodeURIComponent(mode), null);
   }
 
+  // V3.8: every player's public numbers in one read, for the stats tab.
+  function stats() {
+    return call('GET', '/api/stats', null);
+  }
+
   /* V3.5. Public read-only profile. Resolves to the payload, or null. */
   function player(twitchId) {
     if (!twitchId) return Promise.resolve(null);
@@ -273,7 +278,10 @@
      'connecting' | 'live' | 'offline'. Returns a closer. */
   var FEED_TRIES = 4;
   var FEED_HEALTHY_MS = 60000;   // a stream must last this long to earn a fresh budget
-  var FEED_KINDS = ['run_started', 'run_won', 'run_failed', 'flappy_death'];
+  /* run_started is deliberately absent (V3.8): the server stopped emitting
+     them, and skipping the name here keeps any old stored line from rendering
+     during the replay window either. */
+  var FEED_KINDS = ['run_won', 'run_failed', 'flappy_death'];
 
   function openFeed(onLine, onState) {
     var ES = W.EventSource;
@@ -354,6 +362,7 @@
     event: event,
     submitScore: submitScore,
     leaderboard: leaderboard,
+    stats: stats,
     player: player,
     openFeed: openFeed
   });
