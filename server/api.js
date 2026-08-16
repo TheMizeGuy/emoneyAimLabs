@@ -544,7 +544,13 @@ function createApiRouter(deps) {
     res.flushHeaders();
     // Ask a reconnecting browser to wait rather than hammer.
     res.write('retry: 5000\n\n');
-    feed.subscribe(res);
+    // V3.6: ?after=<last event id seen> narrows the replay to the gap. The
+    // client reconnects with a fresh EventSource (it closes the old one to own
+    // the retry budget), so the Last-Event-ID header never travels and the
+    // cursor rides the query string instead. Absent or junk means "from the
+    // top of the buffer".
+    const after = Number.parseInt(req.query.after, 10);
+    feed.subscribe(res, Number.isInteger(after) && after > 0 ? after : 0);
   });
 
   return router;

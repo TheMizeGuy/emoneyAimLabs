@@ -144,8 +144,9 @@
   var beatTimer = 0;
   var inChase = false;             // V3.3: beats carry this once the chase is live
   var BEAT_MS = 5000;
-  var boardMode = 'practice';      // which tab the start-screen panel is showing
-  var lbMode = 'practice';         // and the modal's
+  /* V3.6: the board is simulation-only, so there is no mode state to keep.
+     Practice runs still record and still travel the activity feed; they just
+     never make the list. */
 
   var acctLogin = document.getElementById('btnLogin');
   var acctIn = document.getElementById('acctIn');
@@ -471,7 +472,7 @@
       if (typeof r.bestMs === 'number') note += '   best ' + fmtMs(r.bestMs);
       chase.winExtras({
         note: note,
-        onBoard: function () { openModal(stats.mode || 'practice'); }
+        onBoard: function () { openModal(); }
       });
     });
   }
@@ -650,7 +651,7 @@
   function failWords(d) {
     var abandoned = !d.reason;
     if (d.phase !== 'chase') {
-      return abandoned ? 'gave up in the bird gauntlet' : 'died in the bird gauntlet';
+      return abandoned ? 'gave up in the bird gauntlet' : 'failed on flappy bird';
     }
     if (d.reason === 'captcha-fail') return 'failed the popup chase (INDEFINITE BAN: wrong piece)';
     if (d.reason === 'captcha-timeout') return 'failed the popup chase (INDEFINITE BAN: verification timeout)';
@@ -666,11 +667,14 @@
       return t;
     }
     if (type === 'run_failed') return failWords(d);
-    return 'died to the bird';
+    return 'failed on flappy bird';
   }
 
-  function clockNow() {
-    var t = new Date();
+  /* V3.6: replayed lines carry the server's `at` stamp, so a run from twenty
+     minutes ago reads as twenty minutes ago instead of "just now". A live line
+     without one falls back to the wall clock. */
+  function clockAt(ms) {
+    var t = (typeof ms === 'number' && isFinite(ms)) ? new Date(ms) : new Date();
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     return pad(t.getHours()) + ':' + pad(t.getMinutes()) + ':' + pad(t.getSeconds());
   }
@@ -711,7 +715,7 @@
 
     var when = document.createElement('span');
     when.className = 'feedtime';
-    when.textContent = clockNow();
+    when.textContent = clockAt(d.at);
     line.appendChild(when);
 
     var text = document.createElement('span');
@@ -956,14 +960,10 @@
   var panelBoard = document.getElementById('panelBoard');
   var boardList = document.getElementById('boardList');
   var boardStatus = document.getElementById('boardStatus');
-  var bdPractice = document.getElementById('bdPractice');
-  var bdSim = document.getElementById('bdSim');
 
   var lbBox = document.getElementById('lbBox');
   var lbList = document.getElementById('lbList');
   var lbStatus = document.getElementById('lbStatus');
-  var lbTabPractice = document.getElementById('lbTabPractice');
-  var lbTabSim = document.getElementById('lbTabSim');
   var lbClose = document.getElementById('lbClose');
 
   function showTab(which) {
@@ -972,34 +972,20 @@
     tabBoard.classList.toggle('on', board);
     panelGame.classList.toggle('hide', board);
     panelBoard.classList.toggle('hide', !board);
-    if (board) renderBoard(boardList, boardMode, boardStatus);
-  }
-
-  function setBoardMode(mode) {
-    boardMode = mode;
-    bdPractice.classList.toggle('on', mode === 'practice');
-    bdSim.classList.toggle('on', mode === 'simulation');
-    renderBoard(boardList, boardMode, boardStatus);
+    if (board) renderBoard(boardList, 'simulation', boardStatus);
   }
 
   // the modal, used by the win dialog's View leaderboard button
-  function openModal(mode) {
-    lbMode = (mode === 'simulation') ? 'simulation' : 'practice';
-    lbTabPractice.classList.toggle('on', lbMode === 'practice');
-    lbTabSim.classList.toggle('on', lbMode === 'simulation');
+  function openModal() {
     lbBox.classList.remove('hide');
-    renderBoard(lbList, lbMode, lbStatus);
+    renderBoard(lbList, 'simulation', lbStatus);
   }
 
   if (tabGame) {
     tabGame.addEventListener('click', function () { showTab('game'); });
     tabBoard.addEventListener('click', function () { showTab('board'); });
-    bdPractice.addEventListener('click', function () { setBoardMode('practice'); });
-    bdSim.addEventListener('click', function () { setBoardMode('simulation'); });
   }
   if (lbBox) {
-    lbTabPractice.addEventListener('click', function () { openModal('practice'); });
-    lbTabSim.addEventListener('click', function () { openModal('simulation'); });
     lbClose.addEventListener('click', function () { lbBox.classList.add('hide'); });
   }
   if (acctLogin) {
@@ -1026,7 +1012,7 @@
       return u;
     });
     bootMe.then(function () {
-      return NET.leaderboard('practice');
+      return NET.leaderboard('simulation');
     }).then(function (d) {
       apiUp = !!(d && (d.entries || d.rows));
       paintAccount();

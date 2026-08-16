@@ -1,0 +1,89 @@
+'use strict';
+
+// The replay buffer (V3.6). Without history, every page load greeted the
+// player with an empty log until the next live event; now a subscriber gets
+// the recent past first, and the `after` cursor keeps a reconnecting client
+// from seeing the same lines twice.
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { createFeed, DEFAULT_HISTORY } = require('../feed');
+
+function sink() {
+  return {
+    frames: [],
+    write(frame) { this.frames.push(frame); return true; },
+    end() { this.ended = true; },
+    on() {},
+  };
+}
+
+// Only event frames; the ": connected" comment and keep-alives fall through.
+function eventsOf(s) {
+  return s.frames
+    .map((frame) => /^id: (\d+)\nevent: (\w+)\ndata: (.*)\n\n$/s.exec(frame))
+    .filter(Boolean)
+    .map((m) => ({ id: Number(m[1]), type: m[2], data: JSON.parse(m[3]) }));
+}
+
+test('events emitted with nobody connected replay to the next subscriber', () => {
+  const feed = createFeed({ now: () => 12345 });
+  assert.equal(feed.emit('run_started', { name: 'A', mode: 'simulation' }), 0);
+
+  const s = sink();
+  feed.subscribe(s);
+  const got = eventsOf(s);
+  assert.equal(got.length, 1);
+  assert.equal(got[0].id, 1);
+  assert.equal(got[0].type, 'run_started');
+  assert.equal(got[0].data.name, 'A');
+  assert.equal(got[0].data.at, 12345, 'the line carries when it happened');
+});
+
+test('replay arrives oldest first and live events keep flowing after it', () => {
+  const feed = createFeed({ now: () => 1 });
+  feed.emit('run_started', { n: 1 });
+  feed.emit('run_won', { n: 2 });
+
+  const s = sink();
+  feed.subscribe(s);
+  feed.emit('flappy_death', { n: 3 });
+  assert.deepEqual(eventsOf(s).map((e) => e.type), ['run_started', 'run_won', 'flappy_death']);
+  assert.deepEqual(eventsOf(s).map((e) => e.id), [1, 2, 3]);
+});
+
+test('subscribe(after) replays only the gap', () => {
+  const feed = createFeed({ now: () => 1 });
+  feed.emit('run_started', { n: 1 });
+  feed.emit('run_won', { n: 2 });
+  feed.emit('flappy_death', { n: 3 });
+
+  // A client that saw everything gets nothing back.
+  const caughtUp = sink();
+  feed.subscribe(caughtUp, 3);
+  assert.equal(eventsOf(caughtUp).length, 0);
+
+  // One that saw only the first line gets the rest, in order.
+  const behind = sink();
+  feed.subscribe(behind, 1);
+  assert.deepEqual(eventsOf(behind).map((e) => e.id), [2, 3]);
+});
+
+test('the buffer is a ring: only the newest lines survive', () => {
+  const feed = createFeed({ historySize: 3, now: () => 1 });
+  for (let i = 1; i <= 5; i += 1) feed.emit('run_started', { n: i });
+
+  const s = sink();
+  feed.subscribe(s);
+  assert.deepEqual(eventsOf(s).map((e) => e.data.n), [3, 4, 5]);
+  assert.deepEqual(eventsOf(s).map((e) => e.id), [3, 4, 5], 'ids are never reused by the trim');
+});
+
+test('emit still reports live deliveries only, and history has a default depth', () => {
+  const feed = createFeed({ now: () => 1 });
+  const s = sink();
+  feed.subscribe(s);
+  assert.equal(feed.emit('run_started', { n: 1 }), 1);
+  assert.equal(typeof DEFAULT_HISTORY, 'number');
+  assert.ok(DEFAULT_HISTORY >= 50, 'deep enough to fill the client log from cold');
+});

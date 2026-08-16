@@ -243,13 +243,21 @@
     if (!CONFIGURED || !ES) { onState('offline'); return function () { }; }
 
     var es = null, tries = 0, dead = false, opened = false, openedAt = 0;
+    var lastId = '';               // V3.6: the newest event id this client has seen
 
     function state(s) { try { onState(s); } catch (e) { } }
 
     function connect() {
       if (dead) return;
       state('connecting');
-      try { es = new ES(API_BASE + '/api/feed'); } catch (e) { stop(); state('offline'); return; }
+      /* V3.6: the server replays its recent history on connect, so the log is
+         never empty just because the page is fresh. A reconnect names the last
+         line it saw and gets only the gap -- the Last-Event-ID header would do
+         this for free, but it only travels on the browser's own retry, and the
+         retry here is ours (a fresh EventSource each attempt). */
+      var url = API_BASE + '/api/feed';
+      if (lastId) url += '?after=' + encodeURIComponent(lastId);
+      try { es = new ES(url); } catch (e) { stop(); state('offline'); return; }
 
       es.onopen = function () { opened = true; openedAt = Date.now(); state('live'); };
 
@@ -283,6 +291,7 @@
       var data;
       try { data = JSON.parse(ev.data); } catch (e) { return; }   // keep-alives, junk
       if (!data || typeof data !== 'object') return;
+      if (ev.lastEventId) lastId = ev.lastEventId;
       var type = kind || data.type;
       if (FEED_KINDS.indexOf(type) < 0) return;
       try { onLine(type, data); } catch (e) { }

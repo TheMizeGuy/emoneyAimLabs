@@ -18,8 +18,8 @@
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
   "js/chase.js": "45452ba99c454589ace3e83f8f302762c679ce6ffbb2efe093d332a04775c501",
   "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
-  "js/net.js": "ec923b7f33807ade4dcd7a2ca345ee51195018431f8847c781608a57269756ed",
-  "js/main.js": "aaaad2c6f84ccabb01b770acf32bdebd9ffe1a1a1f7920efc19c0b48dbe97832"
+  "js/net.js": "00579d48161540be613be3ffc3236c97c00ee609e4e87082a9a1e25d45f9af17",
+  "js/main.js": "2fecafbbc49a65320db7fb32b048638def4f8b15be5c264085d556d3d2f661a8"
 }
 </script>
 <style>
@@ -109,7 +109,15 @@
     overflow: auto;
   }
 
-  .startcard { margin: auto; }
+  /* V3.6: the menu window and the activity log window travel as one unit;
+     the auto margins live on the row so the clipping note above still holds. */
+  .startrow {
+    margin: auto;
+    display: flex;
+    align-items: stretch;
+    gap: 14px;
+    max-width: 100%;
+  }
 
   .start.hide { display: none; }
 
@@ -291,6 +299,25 @@
 
   .w95btn:focus-visible { outline: 1px dotted #000; outline-offset: -5px; }
   .w95btn.hide, .acctin.hide, .acctnote.hide { display: none; }
+
+  /* V3.6: the sign-in button wears Twitch purple -- same bevel grammar, the
+     shades just come from the brand colour instead of the grey face */
+  .w95btn.twitch {
+    padding: 8px 18px;
+    background: #9146ff;
+    border-color: #c39aff #4b1e99 #4b1e99 #c39aff;
+    box-shadow: inset 1px 1px 0 #dcc6ff, inset -1px -1px 0 #38126e;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+  }
+
+  .w95btn.twitch:active {
+    border-color: #4b1e99 #c39aff #c39aff #4b1e99;
+    box-shadow: inset 1px 1px 0 #38126e, inset -1px -1px 0 #dcc6ff;
+  }
+
+  .w95btn.twitch:focus-visible { outline: 1px dotted #fff; }
 
   .acctin {
     display: flex;
@@ -546,29 +573,15 @@
   .lb.hide { display: none; }
   .lb .ovcard { width: min(420px, 100%); }
 
-  .lbtabs {
-    display: flex;
-    gap: 4px;
+  /* V3.6: simulation is the only board there is; a caption replaced the tabs */
+  .lbcap {
     margin: 0 0 10px;
-  }
-
-  .lbtab {
-    padding: 5px 14px;
-    background: var(--w95-face);
-    border: 2px solid;
-    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
-    border-radius: 0;
-    color: #3d3d3d;
     font-family: var(--w95);
-    font-size: 12px;
-    cursor: pointer;
-  }
-
-  /* the selected tab reads as pressed in, the way Win95 tabs did */
-  .lbtab.on {
-    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
-    color: #000;
+    font-size: 11px;
     font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #3d3d3d;
   }
 
   /* The details view above is shared by both mounts -- the modal reuses it
@@ -580,11 +593,34 @@
 
   /* ---- V3.5: the activity log, in the shape of Event Viewer -------------- */
 
+  /* V3.6: promoted out of the game panel into its own window, docked to the
+     right of the menu. Stretching with the row hands it the menu's full height,
+     which is the whole point of the move. */
+  .feedcard {
+    width: 300px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-hilite) var(--w95-dark) var(--w95-dark) var(--w95-hilite);
+    box-shadow: inset 2px 2px 0 var(--w95-light), inset -2px -2px 0 var(--w95-shadow);
+    color: #000;
+  }
+
+  .feedbody {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 12px 12px 14px;
+  }
+
   .feed {
-    margin: 16px 0 0;
-    padding: 12px 0 0;
-    border-top: 1px solid var(--w95-shadow);
-    box-shadow: 0 -1px 0 var(--w95-light) inset;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
     text-align: left;
   }
 
@@ -614,7 +650,8 @@
   }
 
   .feedlist {
-    height: 132px;
+    flex: 1 1 auto;
+    min-height: 132px;
     overflow-y: auto;
     padding: 2px;
     border: 2px solid;
@@ -884,6 +921,7 @@
     height: 30px;
     display: flex;
     align-items: center;
+    gap: 4px;
     padding: 3px 4px;
     background: var(--w95-face);
     border-top: 2px solid var(--w95-light);
@@ -1683,6 +1721,15 @@
      cannot collide with the chase classes above.
      ====================================================================== */
 
+  /* Below the width the two windows need side by side (520 + 14 + 300 plus the
+     desktop padding), the log docks under the menu instead and gives its
+     stretch-height back -- an unconstrained column would collapse it. */
+  @media (max-width: 899px) {
+    .startrow { flex-direction: column; }
+    .feedcard { width: auto; }
+    .feedlist { flex: none; height: 180px; }
+  }
+
   @media (max-width: 520px) {
     .sig { max-width: calc(100vw - 32px); }
     .sig p { font-size: 11.5px; }
@@ -1692,11 +1739,12 @@
 <body>
 
 <div class="start" id="startScreen">
+  <div class="startrow">
   <div class="startcard">
     <div class="startbar"><span class="startbartitle">INCIDENT.EXE</span></div>
     <div class="startbody">
       <div class="acct" id="acct">
-        <button class="w95btn" id="btnLogin" type="button">Sign in with Twitch</button>
+        <button class="w95btn twitch" id="btnLogin" type="button">Sign in with Twitch</button>
         <span class="acctin hide" id="acctIn">
           <img class="acctav" id="acctAvatar" alt="" width="22" height="22">
           <span class="acctname" id="acctName"></span>
@@ -1727,23 +1775,10 @@
 
         <button class="mode loud" id="btnSimulation" type="button">Simulation (LOUD!)</button>
         <p class="modenote warn last">Warning: this one plays loud audio. Turn your volume down first.</p>
-
-        <!-- V3.5: the public activity feed, present on the landing tab without
-             any interaction. Fed by SSE; quiet when the stream is not up. -->
-        <div class="feed">
-          <div class="feedhead">
-            <span class="feedtitle">Activity Log</span>
-            <span class="feedstate" id="feedState">Connecting...</span>
-          </div>
-          <div class="feedlist" id="feedList"></div>
-        </div>
       </div>
 
       <div class="panel hide" id="panelBoard">
-        <div class="lbtabs">
-          <button class="lbtab on" id="bdPractice" type="button">Practice</button>
-          <button class="lbtab" id="bdSim" type="button">Simulation</button>
-        </div>
+        <p class="lbcap">Simulation runs only</p>
         <div class="lblist">
           <div class="lbhead">
             <span class="lbcol lbrank">RANK</span>
@@ -1760,17 +1795,31 @@
       </div>
     </div>
   </div>
-  <div class="taskbar" aria-hidden="true"><span class="taskbtn">INCIDENT.EXE</span></div>
+
+  <!-- V3.6: the public activity feed, its own window docked beside the menu so
+       the log gets the menu's full height. Fed by SSE; quiet when the stream
+       is not up. -->
+  <aside class="feedcard">
+    <div class="startbar"><span class="startbartitle">EVENTVWR.EXE</span></div>
+    <div class="feedbody">
+      <div class="feed">
+        <div class="feedhead">
+          <span class="feedtitle">Activity Log</span>
+          <span class="feedstate" id="feedState">Connecting...</span>
+        </div>
+        <div class="feedlist" id="feedList"></div>
+      </div>
+    </div>
+  </aside>
+  </div>
+  <div class="taskbar" aria-hidden="true"><span class="taskbtn">INCIDENT.EXE</span><span class="taskbtn">EVENTVWR.EXE</span></div>
 </div>
 
 <div class="lb hide" id="lbBox">
   <div class="ovcard">
     <div class="ovbar"><span class="ovbartitle">Leaderboard</span></div>
     <div class="ovbody">
-      <div class="lbtabs">
-        <button class="lbtab on" id="lbTabPractice" type="button">Practice</button>
-        <button class="lbtab" id="lbTabSim" type="button">Simulation</button>
-      </div>
+      <p class="lbcap">Simulation runs only</p>
       <div class="lblist">
         <div class="lbhead">
           <span class="lbcol lbrank">RANK</span>

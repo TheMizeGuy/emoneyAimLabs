@@ -68,7 +68,8 @@ async function createContext(options = {}) {
   const limiter = createRateLimiter({ now: () => clock.nowMs() });
   const logs = [];
   const log = (message) => logs.push(message);
-  const feed = createFeed(options.feed);
+  // The feed rides the test clock so every event's `at` stamp is deterministic.
+  const feed = createFeed({ now: () => clock.nowMs(), ...(options.feed || {}) });
   const twitch = options.twitch || {
     exchangeCode: async () => 'unused-token',
     fetchIdentity: async () => ({ id: '1', login: 'x', displayName: 'X', avatarUrl: '' }),
@@ -145,7 +146,7 @@ async function createContext(options = {}) {
     const events = [];
     const sink = {
       write(frame) {
-        const match = /^event: (\w+)\ndata: (.*)\n\n$/s.exec(frame);
+        const match = /^(?:id: \d+\n)?event: (\w+)\ndata: (.*)\n\n$/s.exec(frame);
         if (match) events.push({ type: match[1], data: JSON.parse(match[2]) });
         return true;
       },

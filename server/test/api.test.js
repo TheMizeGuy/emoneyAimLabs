@@ -937,7 +937,9 @@ test('run creation closes the previous run and streams the failure', async (t) =
   assert.equal(me.json.chaseFails, 0, 'it never reached the popup');
   const failed = stream.of('run_failed');
   assert.equal(failed.length, 1);
-  assert.deepEqual(failed[0].data, {
+  const { at: failedAt, ...failedData } = failed[0].data;
+  assert.equal(typeof failedAt, 'number');
+  assert.deepEqual(failedData, {
     twitchId: '1',
     name: 'PLAYER',
     avatar: 'https://cdn.test/player.png',
@@ -948,7 +950,9 @@ test('run creation closes the previous run and streams the failure', async (t) =
 
   const started = stream.of('run_started');
   assert.equal(started.length, 2);
-  assert.deepEqual(started[0].data, {
+  const { at: startedAt, ...startedData } = started[0].data;
+  assert.equal(typeof startedAt, 'number');
+  assert.deepEqual(startedData, {
     twitchId: '1',
     name: 'PLAYER',
     avatar: 'https://cdn.test/player.png',
@@ -997,7 +1001,9 @@ test('a win streams to the feed with its time and clicks', async (t) => {
 
   const won = stream.of('run_won');
   assert.equal(won.length, 1);
-  assert.deepEqual(won[0].data, {
+  const { at: wonAt, ...wonData } = won[0].data;
+  assert.equal(wonAt, ctx.clock.nowMs(), 'the line is stamped on the server clock');
+  assert.deepEqual(wonData, {
     twitchId: '1',
     name: 'PLAYER',
     avatar: 'https://cdn.test/player.png',
@@ -1016,7 +1022,9 @@ test('a flappy death streams live', async (t) => {
   await ctx.clientFor('1').post('/api/event', { type: 'flappy_death' });
   const deaths = stream.of('flappy_death');
   assert.equal(deaths.length, 1);
-  assert.deepEqual(deaths[0].data, {
+  const { at: deathAt, ...deathData } = deaths[0].data;
+  assert.equal(typeof deathAt, 'number');
+  assert.deepEqual(deathData, {
     twitchId: '1',
     name: 'PLAYER',
     avatar: 'https://cdn.test/player.png',
@@ -1182,6 +1190,53 @@ test('the live feed streams over SSE and survives a disconnect', async (t) => {
   // The server notices the drop and forgets the client.
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(ctx.feed.size(), 0);
+});
+
+test('the feed replays recent history on connect and ?after narrows it', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+
+  // Two events happen while nobody at all is watching.
+  await client.post('/api/run', { mode: 'practice' });
+  await client.post('/api/event', { type: 'flappy_death' });
+
+  async function connectAndRead(query, marker) {
+    const controller = new AbortController();
+    const response = await fetch(`${ctx.base}/api/feed${query}`, {
+      headers: { Origin: ctx.config.gameOrigin, Accept: 'text/event-stream' },
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (let i = 0; i < 40 && !buffer.includes(marker); i += 1) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+    }
+    controller.abort();
+    await response.body?.cancel().catch(() => {});
+    return buffer;
+  }
+
+  // A cold connect gets the whole recent past, oldest first, stamped.
+  const cold = await connectAndRead('', 'event: flappy_death');
+  assert.match(cold, /id: 1\nevent: run_started/);
+  assert.match(cold, /id: 2\nevent: flappy_death/);
+  assert.ok(cold.indexOf('run_started') < cold.indexOf('flappy_death'));
+  assert.match(cold, /"at":\d+/);
+
+  // A reconnect that already saw line 1 gets only the gap.
+  const warm = await connectAndRead('?after=1', 'event: flappy_death');
+  assert.ok(!warm.includes('event: run_started'), `saw: ${warm}`);
+  assert.match(warm, /id: 2\nevent: flappy_death/);
+
+  // Junk cursors mean "from the top", never an error.
+  const junk = await connectAndRead('?after=banana', 'event: flappy_death');
+  assert.match(junk, /id: 1\nevent: run_started/);
 });
 
 test('feed connections are capped and rate limited', async (t) => {
