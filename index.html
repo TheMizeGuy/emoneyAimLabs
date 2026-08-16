@@ -17,7 +17,7 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "344537009256c83fd20922adb599db1c7cdc51a0342124b4cad4ccd947b548e3",
+  "js/chase.js": "a9300a19e98801e00202b349d130901b4f634560466abb7e1b5abe9865bcf2e1",
   "js/flappy.js": "9f3e7edc6efa1ef71965de76494e1e1e8d107fa6d53256cf2df0e5ab4991f959",
   "js/net.js": "8902ac4006669c880c6786c1512813bc766e81e00fa3cdbddf85287648a2d553",
   "js/main.js": "d94ad03019960a55222c0872b262e5948a9c8c1daf81920c07e222a9fe302000"
@@ -1527,7 +1527,8 @@
 
   /* a desktop folder: body and tab drawn in borders, white caption below.
      Still the playfield -- clicking one is a miss -- so the cursor stays the
-     crosshair rather than promising a safe target. */
+     crosshair rather than promising a safe target. The 132px matches
+     FOLDER_BOX_W in chase.js: the keep-out test measures this box. */
   .fold {
     position: absolute;
     width: 132px;

@@ -2365,7 +2365,9 @@
        wall the server relies on -- the run and shot clocks charge throughout,
        and closing a window costs nothing but the trip. */
     var FOLDER_COUNT   = 10;
-    var FOLDER_MIN_GAP = 150;   // px between icon origins when seeding
+    var FOLDER_MIN_GAP = 160;   // px between icon origins when seeding; must
+                                // exceed the box diagonal (158.6) or the
+                                // never-stack comment below stops being true
     var FW_W = 300, FW_H = 210; // the folder window, chrome included
     var FOLDER_NAMES = ['New Folder', 'New Folder (2)', 'New Folder (3)',
                         'My Documents', 'DO NOT OPEN', 'taxes 1997',
@@ -2374,8 +2376,9 @@
                         'wedding pics 2003'];
     /* V4.1: the desktop opens folders on its own. Every few seconds of live
        Chase a random closed folder pops its window over the field -- same
-       economy as a clicked one, so it is pressure on the shot clock, never a
-       new wall, and it never charges a miss the player did not click for. */
+       economy as a clicked one: it usually lands right on the X, but the way
+       out stays free, the server never checks, and it never charges a miss
+       the player did not click for. */
     var FOLDER_POP_MIN_MS = 4000, FOLDER_POP_MAX_MS = 7000;
     var nextFolderPopAt = 0;
     var foldersOpen = 0;
@@ -2438,9 +2441,11 @@
         }
         placed.push([fx, fy]);
         var pick = Math.floor(rnd() * names.length) % names.length;
-        var icon = folderIcon(names.splice(pick, 1)[0], fx, fy);
-        deskIcons.push(icon);
-        deskEl.appendChild(icon);
+        var name = names.splice(pick, 1)[0];
+        var made = folderIcon(name, fx, fy);
+        deskIcons.push(made.node);
+        folderReg.push({ name: name, holder: made.holder });
+        deskEl.appendChild(made.node);
       }
       deskEl.classList.add('on');
       deskWins.classList.add('on');
@@ -2461,13 +2466,12 @@
       // One window per folder at a time; re-clicking while it is open only
       // costs the miss the shared handler already charged.
       var holder = { open: false };
-      folderReg.push({ name: name, holder: holder });
       on(f, 'click', function (e) {
         if (!e.isTrusted || !deskLive() || holder.open) return;
         holder.open = true;
         openFolderWindow(name, holder, false);
       });
-      return f;
+      return { node: f, holder: holder };
     }
 
     function openFolderWindow(name, holder, auto) {
@@ -2519,10 +2523,8 @@
           + (auto ? ' src=auto' : ''));
     }
 
-    /* The auto-opener's clock. Runs every frame from frame(); anything that
-       stops the desk being live -- pause, captcha, the ban screen -- also
-       resets the deadline, so a resume always gets the full grace period
-       rather than a window in the face. */
+    /* The auto-opener's clock. The desk being live is the gate; see the call
+       in frame() for why it sits ahead of the pause return. */
     function folderPopTick(now) {
       if (!deskLive() || !started) { nextFolderPopAt = 0; return; }
       if (!nextFolderPopAt) {
@@ -2541,7 +2543,9 @@
       var pick = closed[Math.floor(rnd() * closed.length) % closed.length];
       pick.holder.open = true;
       openFolderWindow(pick.name, pick.holder, true);
-      showTaunt(TAUNT_AUTOPOP);
+      // The pop already announces itself twice -- the window and the chord --
+      // so it defers to any taunt currently explaining a refused press.
+      if (!tauntOn) showTaunt(TAUNT_AUTOPOP);
       playError();
     }
 
