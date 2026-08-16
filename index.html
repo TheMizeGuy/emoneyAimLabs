@@ -16,10 +16,10 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "f4afac855ddee168605d7cbf89c8a0e270bf8b15789aa13da6e2a495985e198a",
+  "js/chase.js": "488175a488df63d2ac700466cc7cb99b76054314e6382b1b648b538b9fc86ea3",
   "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
   "js/net.js": "227c2dc6d577cdd1ece8192a359c8f7ede66193796688e03dd3751fd70ea049b",
-  "js/main.js": "a087889bb426e33450765d7e42d80d1fb8cf90c4be668085195ced4a05d3b470"
+  "js/main.js": "bd9608cfac688585a404dc9ec33e6cb9d20b0a3e8d8303a071ede70498f9e329"
 }
 </script>
 <style>
@@ -109,6 +109,63 @@
     overflow: auto;
   }
 
+  /* ---- V3.10: Win95 scrollbars -----------------------------------------
+     The one piece of chrome the browser draws itself, and the one that most
+     loudly broke the period spell while it stayed macOS-slim. WebKit/Blink
+     get the real thing -- dithered track, raised thumb, arrow buttons;
+     Firefox at least gets the right colours. */
+  * { scrollbar-color: var(--w95-face) #dfdfdf; }
+
+  ::-webkit-scrollbar { width: 16px; height: 16px; }
+
+  ::-webkit-scrollbar-track {
+    background-color: #fff;
+    background-image:
+      linear-gradient(45deg, var(--w95-face) 25%, transparent 25%, transparent 75%, var(--w95-face) 75%),
+      linear-gradient(45deg, var(--w95-face) 25%, transparent 25%, transparent 75%, var(--w95-face) 75%);
+    background-size: 2px 2px;
+    background-position: 0 0, 1px 1px;
+  }
+
+  ::-webkit-scrollbar-thumb,
+  ::-webkit-scrollbar-button {
+    background-color: var(--w95-face);
+    border: 1px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    box-shadow: inset 1px 1px 0 var(--w95-hilite), inset -1px -1px 0 var(--w95-shadow);
+  }
+
+  ::-webkit-scrollbar-button {
+    width: 16px;
+    height: 16px;
+    background-repeat: no-repeat;
+    background-position: center;
+  }
+
+  /* one arrow per end, not the doubled pair */
+  ::-webkit-scrollbar-button:vertical:start:increment,
+  ::-webkit-scrollbar-button:vertical:end:decrement,
+  ::-webkit-scrollbar-button:horizontal:start:increment,
+  ::-webkit-scrollbar-button:horizontal:end:decrement { display: none; }
+
+  ::-webkit-scrollbar-button:vertical:decrement {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><path d='M8 6l3.5 3.5h-7z' fill='black'/></svg>");
+  }
+
+  ::-webkit-scrollbar-button:vertical:increment {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><path d='M8 10l3.5-3.5h-7z' fill='black'/></svg>");
+  }
+
+  ::-webkit-scrollbar-button:horizontal:decrement {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><path d='M6.5 8l3.5-3.5v7z' fill='black'/></svg>");
+  }
+
+  ::-webkit-scrollbar-button:horizontal:increment {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><path d='M9.5 8L6 4.5v7z' fill='black'/></svg>");
+  }
+
+  ::-webkit-scrollbar-corner { background: var(--w95-face); }
+
   /* V3.6: the menu window and the activity log window travel as one unit;
      the auto margins live on the row so the clipping note above still holds. */
   .startrow {
@@ -148,6 +205,69 @@
     font-weight: 700;
     letter-spacing: 0.01em;
     color: #fff;
+  }
+
+  /* V3.10: the 16x16 app icon at the caption's left edge, as every window had */
+  .capicon {
+    width: 16px;
+    height: 16px;
+    margin-right: 6px;
+    image-rendering: pixelated;
+  }
+
+  /* minimize / maximize / close, drawn but not wired -- flavour, like the
+     taskbar. Real Win95 geometry: a tight pair, a 2px gap, then the X. */
+  .capbtns {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+    padding-left: 8px;
+  }
+
+  .capbtn {
+    position: relative;
+    width: 18px;
+    height: 16px;
+    background: var(--w95-face);
+    border: 1px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    box-shadow: inset 1px 1px 0 var(--w95-hilite), inset -1px -1px 0 var(--w95-shadow);
+  }
+
+  .capbtn.cx { margin-left: 2px; }
+
+  .capbtn.cmin::after,
+  .capbtn.cmax::after {
+    content: "";
+    position: absolute;
+  }
+
+  .capbtn.cmin::after {
+    left: 4px;
+    bottom: 3px;
+    width: 8px;
+    height: 2px;
+    background: #000;
+  }
+
+  .capbtn.cmax::after {
+    left: 3px;
+    top: 3px;
+    width: 10px;
+    height: 8px;
+    box-sizing: border-box;
+    border: 1px solid #000;
+    border-top-width: 2px;
+  }
+
+  .capbtn.cx::after {
+    content: "×";
+    position: absolute;
+    inset: -1px 0 0;
+    font: 700 13px/16px var(--w95);
+    text-align: center;
+    color: #000;
   }
 
   .startbody { padding: 16px 18px 18px; }
@@ -499,6 +619,8 @@
   .lbrow .lbclicks,
   .lbrow .lbfails,
   .lbrow .lbbird,
+  .lbrow .stnumcol,
+  .lbrow .sttimecol,
   .lbrow .lbchase { padding: 1px 6px; box-sizing: border-box; font-variant-numeric: tabular-nums; }
   .lbrow .lbtime { font-family: var(--mono); font-size: 11.5px; }
 
@@ -609,28 +731,46 @@
   }
 
   /* V3.8: the stats board's sortable column headers. Same details-view look;
-     each header is a live button and the active one wears its direction. */
-  .stname   { flex: 1 1 auto; min-width: 92px; text-align: left; }
-  .stnumcol { flex: none; width: 46px; text-align: right; }
-  .sttimecol { flex: none; width: 58px; text-align: right; }
+     each header is a live button and the active one wears its direction.
+     V3.10: the buttons KEEP the .lbcol raised-header dress. The old button
+     reset (padding:0/border:0/background:none) stripped the bevel, the
+     padding and the face fill, which left one flat grey strip whose labels
+     drifted off their columns and let rows show through the sticky head.
+     Only what a <button> genuinely needs reset is reset here. */
+  .stname    { flex: 1 1 auto; min-width: 92px; text-align: left; }
+  .stnumcol  { flex: none; width: 58px; text-align: right; }
+  .sttimecol { flex: none; width: 66px; text-align: right; }
+
+  /* seven columns of the stats board's own widths; the board keeps its 428 */
+  #panelStats .lbhead,
+  #panelStats .lbbody { min-width: 456px; }
 
   .stsort {
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    letter-spacing: inherit;
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 0;
     cursor: pointer;
   }
 
-  .stsort:hover { text-decoration: underline; }
-  .stsort:focus-visible { outline: 1px dotted #000; }
+  /* the whole header depresses on click, exactly as Explorer's did */
+  .stsort:active {
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    padding: 4px 5px 2px 7px;
+  }
 
-  .lbrow .stnum {
+  .stsort:focus-visible { outline: 1px dotted #000; outline-offset: -3px; }
+
+  /* the sort marker rides the label's outward side (set in js), so the
+     label's column edge never moves when the arrow appears */
+  .stdir { font-size: 8px; }
+
+  /* counts read in the UI face like the board's CLICKS/FAILS; times in mono
+     like the board's TIME column */
+  .lbrow .stnumcol { font-family: var(--w95); font-size: 12px; }
+
+  .lbrow .sttimecol {
     font-family: var(--mono);
     font-size: 11.5px;
-    text-align: right;
   }
 
   /* The details view above is shared by both mounts -- the modal reuses it
@@ -990,6 +1130,64 @@
     font-size: 11.5px;
     font-weight: 700;
     color: #000;
+  }
+
+  /* V3.10: no Win95 taskbar is complete without Start, and this one went
+     without for two whole versions. Same flavour-only rule as the rest. */
+  .startbtn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px 3px 6px;
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    box-shadow: inset 1px 1px 0 var(--w95-hilite), inset -1px -1px 0 var(--w95-shadow);
+    font-family: var(--w95);
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #000;
+  }
+
+  .startbtn img {
+    width: 16px;
+    height: 16px;
+    image-rendering: pixelated;
+  }
+
+  /* the etched divider between Start and the running windows */
+  .taskdiv {
+    align-self: stretch;
+    margin: 1px 2px;
+    border-left: 1px solid var(--w95-shadow);
+    border-right: 1px solid var(--w95-light);
+  }
+
+  /* the focused window's button rides pressed, on the white dither Win95
+     used for exactly this */
+  .taskbtn.on {
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+    box-shadow: inset 1px 1px 0 var(--w95-shadow), inset -1px -1px 0 var(--w95-hilite);
+    background-color: var(--w95-face);
+    background-image:
+      linear-gradient(45deg, #fff 25%, transparent 25%, transparent 75%, #fff 75%),
+      linear-gradient(45deg, #fff 25%, transparent 25%, transparent 75%, #fff 75%);
+    background-size: 2px 2px;
+    background-position: 0 0, 1px 1px;
+  }
+
+  /* the tray clock, sunken, far right */
+  .tray {
+    margin-left: auto;
+    padding: 4px 10px;
+    border: 1px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    font-family: var(--w95);
+    font-size: 11px;
+    color: #000;
+    min-width: 56px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    box-sizing: border-box;
   }
 
   /* ---- SHELL: where a mode mounts ------------------------------------ */
@@ -1794,7 +1992,7 @@
 <div class="start" id="startScreen">
   <div class="startrow">
   <div class="startcard">
-    <div class="startbar"><span class="startbartitle">INCIDENT.EXE</span></div>
+    <div class="startbar"><img class="capicon" src="./assets/emoney.png" alt=""><span class="startbartitle">INCIDENT.EXE</span><span class="capbtns" aria-hidden="true"><span class="capbtn cmin"></span><span class="capbtn cmax"></span><span class="capbtn cx"></span></span></div>
     <div class="startbody">
       <div class="acct" id="acct">
         <button class="w95btn twitch" id="btnLogin" type="button">Sign in with Twitch</button>
@@ -1875,7 +2073,7 @@
        the log gets the menu's full height. Fed by SSE; quiet when the stream
        is not up. -->
   <aside class="feedcard" aria-labelledby="feedTitle">
-    <div class="startbar"><span class="startbartitle">EVENTVWR.EXE</span></div>
+    <div class="startbar"><span class="startbartitle">EVENTVWR.EXE</span><span class="capbtns" aria-hidden="true"><span class="capbtn cmin"></span><span class="capbtn cmax"></span><span class="capbtn cx"></span></span></div>
     <div class="feedbody">
       <div class="feed">
         <div class="feedhead">
@@ -1887,7 +2085,7 @@
     </div>
   </aside>
   </div>
-  <div class="taskbar" aria-hidden="true"><span class="taskbtn">INCIDENT.EXE</span><span class="taskbtn">EVENTVWR.EXE</span></div>
+  <div class="taskbar" aria-hidden="true"><span class="startbtn"><img src="./assets/emoney.png" alt="">Start</span><span class="taskdiv"></span><span class="taskbtn on">INCIDENT.EXE</span><span class="taskbtn">EVENTVWR.EXE</span><span class="tray" id="trayClock"></span></div>
 </div>
 
 <div class="lb hide" id="lbBox">

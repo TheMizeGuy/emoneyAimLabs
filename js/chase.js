@@ -226,7 +226,7 @@
     '<p class="errtext"><span data-el="pauseL1">This window is too small to run away in.</span><br>',
     '<span data-el="pauseL2">Make the browser bigger to carry on.</span></p>',
     '</div>',
-    '<p class="errsub">Paused. The clock is not running.</p>',
+    '<p class="errsub" data-el="pauseSub">Paused. The clock is not running.</p>',
     '</div>',
     '</div>',
     '</div>'
@@ -588,6 +588,7 @@
     var pauseBox  = el('pauseBox');
     var pauseL1   = el('pauseL1');
     var pauseL2   = el('pauseL2');
+    var pauseSub  = el('pauseSub');
     var capBox    = el('capBox');
     var capScene  = el('capScene');
     var capCanvas = el('capCanvas');
@@ -747,6 +748,11 @@
        window while it is unfocused cannot resume a run nobody is looking at,
        and vice versa: the field is live only when BOTH are clear. */
     var pauseSmall = false, pauseUnfocused = false;
+    /* Whether the pause being served included a focus loss. A too-small window
+       is a state the player cannot play in, so its clock stops and the time is
+       given back; walking away from the window is a choice, so its clock keeps
+       running. Sticky for the whole pause: once you left, you left. */
+    var pauseWasUnfocused = false;
     // When the playfield last became live. The arming gate reads it (V3.9).
     var armAt = -1e9, armFrame = -1e9;
     // Trusted press timestamps inside CLICK_WINDOW_MS, for the spam gate (V3.9).
@@ -1867,14 +1873,19 @@
          restores focus also lands on the page. */
       arm();
       pauseBox.classList.add('hide');
-      // Every clock the engine keeps skips the paused interval, so a pause can
-      // neither pad a time nor read as drift when the run continues.
+      /* A small-window pause skips its interval on every clock the engine keeps,
+         so it can neither pad a time nor read as drift. An unfocused pause
+         deliberately does NOT: the run timer and the shot clock both keep
+         counting while you are away, so alt-tabbing costs you the time instead
+         of banking it. Advancing none of the three keeps them consistent with
+         each other, which is what the drift check actually compares. */
       var d = NOW() - pauseAt;
-      if (started && d > 0) {
+      if (started && d > 0 && !pauseWasUnfocused) {
         shStartT.set(shStartT.get() + d);
         startWall += WALL() - pauseWall;
         startWall2 += wall2() - pauseWall2;
       }
+      pauseWasUnfocused = false;
       clkLast = null; clkPair = -1; clkStill = 0; rafSkew0 = null;
       audioT0 = -1; audioBad = 0;
       accumMs = 0;
@@ -1888,6 +1899,7 @@
       if (won || stopped) return;
       pauseSmall = !playable();
       if (pauseSmall || pauseUnfocused) {
+        if (pauseUnfocused) pauseWasUnfocused = true;
         if (pauseSmall) {
           setText(pauseL1, 'This window is too small to run away in.');
           setText(pauseL2, 'Make the browser bigger to carry on.');
@@ -1895,6 +1907,12 @@
           setText(pauseL1, 'He does not perform for an empty room.');
           setText(pauseL2, 'Click back into the window to carry on.');
         }
+        /* The small-window pause is a state you cannot play in, so it hands the
+           time back. Walking away is a choice, so it does not -- and the sub-line
+           says so rather than letting the player find out at the ban screen. */
+        setText(pauseSub, pauseWasUnfocused
+          ? 'Paused. The clock is STILL RUNNING.'
+          : 'Paused. The clock is not running.');
         enterPause();
         return;
       }

@@ -992,7 +992,7 @@
 
   function statCell(text, cls) {
     var el = document.createElement('span');
-    el.className = cls + ' stnum';
+    el.className = cls;
     el.textContent = text;
     return el;
   }
@@ -1027,9 +1027,25 @@
   function paintStatsHead() {
     var btns = panelStats.querySelectorAll('.stsort');
     for (var i = 0; i < btns.length; i++) {
-      var on = btns[i].getAttribute('data-key') === statsSort.key;
-      btns[i].textContent = btns[i].getAttribute('data-label')
-        + (on ? (statsSort.dir < 0 ? ' ▼' : ' ▲') : '');
+      var b = btns[i];
+      var label = b.getAttribute('data-label');
+      var on = b.getAttribute('data-key') === statsSort.key;
+      b.textContent = '';
+      var dir = null;
+      if (on) {
+        dir = document.createElement('span');
+        dir.className = 'stdir';
+        dir.textContent = statsSort.dir < 0 ? '▼' : '▲';
+      }
+      // The arrow sits on the label's OUTWARD side -- before a right-aligned
+      // label, after the left-aligned PLAYER -- so the label's edge stays
+      // planted over its column whichever header carries the sort.
+      var leftAligned = b.classList.contains('stname');
+      if (dir && !leftAligned) { b.appendChild(dir); b.appendChild(document.createTextNode(' ')); }
+      b.appendChild(document.createTextNode(label));
+      if (dir && leftAligned) { b.appendChild(document.createTextNode(' ')); b.appendChild(dir); }
+      b.setAttribute('aria-label',
+        label + (on ? (statsSort.dir < 0 ? ', sorted descending' : ', sorted ascending') : ''));
     }
   }
 
@@ -1175,6 +1191,22 @@
      start screen immediately, so the panel would never be seen: no stream is
      opened for one, which also keeps the seam's network footprint minimal. */
   if (!isSeam) startFeed();
+
+  /* V3.10: the taskbar clock. Decorative like the rest of the bar, but a
+     tray that never ticks reads as a hang, which is the wrong joke. */
+  var tray = document.getElementById('trayClock');
+  if (tray) {
+    var tickTray = function () {
+      var d = new Date();
+      var h = d.getHours();
+      var m = d.getMinutes();
+      var ap = h >= 12 ? 'PM' : 'AM';
+      h = h % 12 || 12;
+      tray.textContent = h + ':' + (m < 10 ? '0' + m : m) + ' ' + ap;
+    };
+    tickTray();
+    setInterval(tickTray, 15000);
+  }
 
   if (mode === 'practice') startPractice();
   else if (mode === 'simulation') startSimulation(false);
