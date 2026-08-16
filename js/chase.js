@@ -126,6 +126,7 @@
     '<div class="hud" data-el="hud">',
     '<div class="row mode"><span class="v" data-el="mode">PRACTICE</span></div>',
     '<div class="row time"><span class="k">TIME</span><span class="v" data-el="time">00:00.000</span></div>',
+    '<div class="row shot hide" data-el="shotRow"><span class="k">TIME LEFT</span><span class="v" data-el="shotClock">60</span></div>',
     '<div class="row"><span class="k">MISSES</span><span class="v" data-el="miss">0</span></div>',
     '<div class="row"><span class="k">NEAR</span><span class="v" data-el="near">0</span></div>',
     '<div class="row best hide" data-el="bestRow"><span class="k">BEST</span><span class="v" data-el="best">--</span></div>',
@@ -318,6 +319,12 @@
     var CAPTCHA_LIMIT_MS = 60000; // V2.14: the countdown, and one drop only
     var CAP_W = 260, CAP_H = 150, CAP_PIECE = 46;
 
+    /* V2.19 -- the simulation shot clock. Sixty seconds of run time to close the
+       window, and the run timer keeps counting through every captcha, so the
+       captchas eat the clock. Practice has neither clock nor ban. */
+    var SHOT_CLOCK_MS = 60000;
+    var SHOT_LOW_MS   = 10000;   // the readout reddens here
+
     /* V2.16 -- hostile resume. The shield marks the cursor absent so the card
        wanders while the dialog is up; without this the engine stayed blind until
        the player's NEXT pointermove, handing them a becalmed card doing idle
@@ -481,6 +488,8 @@
     var capCanvas = el('capCanvas');
     var capPiece  = el('capPiece');
     var capClock  = el('capClock');
+    var shotRow   = el('shotRow');
+    var elShot    = el('shotClock');   // NOT 'shot': that data-el names the card's image holder
     var banBox    = el('banBox');
     var banSub    = el('banSub');
     var banRetry  = el('banRetry');
@@ -558,6 +567,8 @@
 
     /* V2.12 captcha, all closure-local per V2.6 layer 1. */
     var CAPTCHA_ON = (MODE_LABEL === 'SIMULATION');
+    var SHOT_CLOCK_ON = (MODE_LABEL === 'SIMULATION');
+    var shotLeftShown = -1;
     var capBroken = false, capShown = false, capAt = Infinity, capShownAt = 0, capBeatT = 0;
     var capCycle = 0;
     var capMissTarget = 0, capUsed = false, banned = false, capLeftShown = -1;
@@ -1128,6 +1139,7 @@
       n += ensure(root, banBox, null);
       n += ensure(capScene, capCanvas, capPiece);
       n += ensure(capScene, capPiece, null);
+      if (SHOT_CLOCK_ON) n += ensure(hudEl, shotRow, null);
       n += ensure(hudEl, rowSus, null);
       n += ensure(rowSus, elSus, null);
       n += ensure(ovWin, elOvTime, elOvNote);
@@ -1326,8 +1338,11 @@
       capBox.classList.add('hide');
       stopAudio();
       killErrorVoices();
-      setText(banSub, (reason === 'captcha-timeout')
-        ? 'You ran out of time.' : 'That is not where the piece goes.');
+      setText(banSub, (reason === 'timeout')
+        ? 'Sixty seconds. The window outlasted you.'
+        : (reason === 'captcha-timeout')
+          ? 'You ran out of time.'
+          : 'That is not where the piece goes.');
       banBox.classList.remove('hide');
       LOG('[AIMLAB] BANNED reason=' + reason);
     }
@@ -2337,6 +2352,19 @@
       // Layer D samples between sub-step batches: the transform on screen is the
       // one this frame just drew, so it can be compared against the position the
       // engine integrated to.
+      /* V2.19. Checked before capTick, so the game clock outranks the captcha's
+         own 60 s limit: reaching zero mid-captcha bans immediately, and for the
+         run being timed out rather than for the puzzle. */
+      if (SHOT_CLOCK_ON && started && !won && !banned) {
+        var elapsed = t - shStartT.get();
+        var leftMs = SHOT_CLOCK_MS - elapsed;
+        var leftS = Math.ceil(leftMs / 1000);
+        if (leftS < 0) leftS = 0;
+        if (leftS !== shotLeftShown) { shotLeftShown = leftS; setText(elShot, leftS); }
+        if (leftMs <= SHOT_LOW_MS) elShot.classList.add('low');
+        if (leftMs <= 0) { banPlayer('timeout'); return; }
+      }
+
       if (CAPTCHA_ON && !capBroken && !capShown && started && t >= capAt) showCaptcha('timer');
       capTick(t);
 
@@ -2531,6 +2559,10 @@
     /* ---------------- boot ---------------- */
 
     setText(elMode, MODE_LABEL);
+    if (SHOT_CLOCK_ON) {
+      setText(elShot, Math.round(SHOT_CLOCK_MS / 1000));
+      shotRow.classList.remove('hide');
+    }
     showBest();
     renderSus();                 // only visible if flappy already saw something
     measure();

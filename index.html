@@ -16,7 +16,7 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "40192f11c3b73568a53281d4feca3bfa07c78688e76f76528c1953ccc1e500fa",
+  "js/chase.js": "f726c8f1fa7acfbb96273b69776c47c242d3b8db28902a4e0828f412dfecef50",
   "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
   "js/main.js": "bb045cbbfec923513a51fc2a58b9fbed1b58829644dd4a0140bbe6ea32af0eb2"
 }
@@ -354,6 +354,11 @@
     font-size: 17px;
     letter-spacing: 0.02em;
   }
+
+  /* V2.19 shot clock: same Win95 readout as TIME, red in the last ten seconds */
+  .hud .row.shot .v { color: var(--w95-title); font-size: 15px; }
+  .hud .row.shot .v.low { color: #b00000; }
+  .hud .row.hide { display: none; }
 
   .hud .row.best .v { color: #004d15; }   /* 5.57:1 on #c0c0c0; #006b1f was 3.70:1 */
   .hud .row.hide { display: none; }
