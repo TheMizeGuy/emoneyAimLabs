@@ -106,7 +106,12 @@ function createAuthRouter(deps) {
       epoch: epoch === null ? 0 : epoch,
     });
     res.append('Set-Cookie', sessionCookie(token, config.sessionTtlMs));
-    return res.redirect(302, config.gameReturnUrl);
+    // V3.7: the token also rides back in the URL FRAGMENT, because the cookie
+    // alone only signs in browsers that still send third-party cookies (see
+    // sessionLoaderFor). A fragment never reaches a server, a log, or a
+    // Referer; the client stores it and strips it from the address bar
+    // immediately. The cookie stays for the browsers where it works.
+    return res.redirect(302, `${config.gameReturnUrl}#session=${encodeURIComponent(token)}`);
   }));
 
   // Real revocation, not just a cleared cookie: bumping the stored epoch

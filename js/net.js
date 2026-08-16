@@ -16,9 +16,13 @@
 
    Nothing secret lives here. API_BASE and the Twitch redirect are public by
    nature: the OAuth exchange, the client secret and the session HMAC are all
-   server-side. The only credential this file handles is the httpOnly session
-   cookie, which JavaScript cannot read -- it rides along because every request
-   is sent with credentials: 'include'.
+   server-side. Two copies of the signed session travel from here: the httpOnly
+   cookie (rides on credentials: 'include', works where third-party cookies
+   still exist) and, since V3.7, the same token held in localStorage and sent
+   as an Authorization bearer -- because Safari and Firefox never present a
+   railway.app cookie to this page's fetch, which made sign-in a silent no-op
+   there. The token arrives once, in the login redirect's URL fragment, and is
+   scrubbed from the address bar before anything else runs.
 
    The only global is window.AimlabNet, frozen.
 */
@@ -38,6 +42,29 @@
 
   // The deploy step patches API_BASE; until then there is nothing to talk to.
   var CONFIGURED = (API_BASE.indexOf(PLACEHOLDER) < 0) && !!FETCH;
+
+  /* ---- V3.7: the session token, when the cookie cannot travel ---- */
+
+  var TOKEN_KEY = 'eal_session';
+
+  function readToken() {
+    try { return W.localStorage.getItem(TOKEN_KEY); } catch (e) { return null; }
+  }
+
+  function dropToken() {
+    try { W.localStorage.removeItem(TOKEN_KEY); } catch (e) { }
+  }
+
+  /* The login redirect lands with #session=<token>. Harvest it at parse time,
+     before any frame paints, and scrub the fragment so the token never sits in
+     the address bar, a bookmark, or a share. */
+  (function harvest() {
+    var h = '';
+    try { h = W.location.hash || ''; } catch (e) { return; }
+    if (h.indexOf('#session=') !== 0) return;
+    try { W.localStorage.setItem(TOKEN_KEY, decodeURIComponent(h.slice(9))); } catch (e) { }
+    try { W.history.replaceState(null, '', W.location.pathname + W.location.search); } catch (e) { }
+  })();
 
   /* Once a call fails outright we stop trying for a while, so a dead backend
      costs one request rather than one per heartbeat. */
@@ -73,6 +100,13 @@
        it a wall. It goes on bodyless POSTs too (logout is one); without it the
        server answers 415, correctly. */
     if (method !== 'GET') opts.headers = { 'Content-Type': 'application/json' };
+    /* The bearer copy of the session, for browsers that withhold the cookie.
+       The server prefers it over the cookie; sending both is fine. */
+    var tok = readToken();
+    if (tok) {
+      opts.headers = opts.headers || {};
+      opts.headers.Authorization = 'Bearer ' + tok;
+    }
     if (body) opts.body = JSON.stringify(body);
 
     var timer = 0;
@@ -103,8 +137,10 @@
 
       p.then(function (res) {
         if (!res) { markDead(); return done(null); }
-        // 401 is a normal answer (not signed in), not a dead backend
-        if (res.status === 401) return done(null);
+        // 401 is a normal answer (not signed in), not a dead backend. A held
+        // token that earns one is expired or revoked -- keeping it would just
+        // repeat this refusal forever, so it goes.
+        if (res.status === 401) { if (tok) dropToken(); return done(null); }
         if (!res.ok) {
           /* 7.1. Every non-2xx used to collapse into null, so a score the server
              deliberately REFUSED was reported to the player as "the leaderboard
@@ -140,6 +176,7 @@
   }
 
   function logout() {
+    dropToken();
     return call('POST', '/auth/logout', null).then(function () { return true; });
   }
 

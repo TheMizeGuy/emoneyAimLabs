@@ -1339,7 +1339,11 @@ test('a complete login round trip sets a session and discards the token', async 
     { headers: { Cookie: stateCookieValue }, redirect: 'manual' },
   );
   assert.equal(callback.status, 302);
-  assert.equal(callback.headers.get('location'), 'https://themizeguy.github.io/emoneyAimLabs/');
+  // V3.7: the return URL carries the session in its FRAGMENT for browsers
+  // that refuse third-party cookies; the base destination is unchanged.
+  const returned = new URL(callback.headers.get('location'));
+  assert.equal(returned.origin + returned.pathname, 'https://themizeguy.github.io/emoneyAimLabs/');
+  assert.match(returned.hash, /^#session=./);
   assert.deepEqual(seen.codes, ['live-code']);
   assert.deepEqual(seen.revoked, ['secret-user-token'], 'the user token is handed straight back');
 
@@ -1354,6 +1358,15 @@ test('a complete login round trip sets a session and discards the token', async 
   const me = await ctx.makeClient(session.split(';')[0]).get('/api/me');
   assert.equal(me.json.id, '999');
   assert.equal(me.json.displayName, 'Winner');
+
+  // The fragment token IS the session: presented as a bearer with no cookie
+  // at all, it signs in the same user.
+  const fragmentToken = decodeURIComponent(returned.hash.slice('#session='.length));
+  const viaHeader = await fetch(`${ctx.base}/api/me`, {
+    headers: { Origin: ctx.config.gameOrigin, Authorization: `Bearer ${fragmentToken}` },
+  });
+  assert.equal(viaHeader.status, 200);
+  assert.equal((await viaHeader.json()).id, '999');
 
   // The state nonce is single use, cookie or no cookie: the server burns it.
   const replayWithCookie = await fetch(

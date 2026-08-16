@@ -36,7 +36,7 @@ function corsFor(gameOrigin) {
       res.setHeader('Access-Control-Allow-Origin', gameOrigin);
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       res.setHeader('Access-Control-Max-Age', '600');
       if (req.method === 'OPTIONS') return res.status(204).end();
       return next();
@@ -86,11 +86,24 @@ function csrfWallFor(gameOrigin, onThrottle) {
   };
 }
 
-// Attaches req.session ({ sub }) when a valid signed cookie is present.
+// Attaches req.session ({ sub }) when a valid signed token is presented.
+//
+// The token arrives one of two ways (V3.7). The SameSite=None cookie only
+// works where the browser still hands third-party cookies to a github.io
+// page's fetch -- standard Chrome, roughly. Safari blocks them and Firefox
+// partitions them, which made sign-in a silent no-op there: the callback
+// succeeded, the cookie was set, and /api/me never saw it again. So the same
+// signed token also travels as an Authorization bearer, handed to the page
+// once at the end of the login redirect. The header wins when both appear:
+// it is deliberate where the cookie is ambient.
 function sessionLoaderFor(config, now) {
   return function sessionLoader(req, res, next) {
+    const header = req.headers.authorization;
+    const bearer = (typeof header === 'string' && header.startsWith('Bearer '))
+      ? header.slice('Bearer '.length)
+      : null;
     const cookies = parseCookies(req.headers.cookie);
-    const token = cookies[SESSION_COOKIE];
+    const token = bearer || cookies[SESSION_COOKIE] || null;
     req.session = token ? verifySession(config.sessionSecret, token, now().getTime()) : null;
     next();
   };
