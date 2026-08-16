@@ -414,6 +414,12 @@ test('the winning press needs a current multi-frame aim journey', () => {
   assert.match(gate, /return;/);
 });
 
+test('the ranked Chase arming gate allows a 400 ms finish', () => {
+  const chase = source('chase.js');
+  assert.match(chase, /var ARM_MS\s*=\s*400;/);
+  assert.match(chase, /var ARM_FRAMES\s*=\s*12;/);
+});
+
 test('every Chase win is gated by the visual CAPTCHA', () => {
   const chase = source('chase.js');
   assert.match(chase, /var CAPTCHA_ON\s*=\s*true;/);

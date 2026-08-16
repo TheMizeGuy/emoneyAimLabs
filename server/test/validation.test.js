@@ -711,8 +711,8 @@ test('config refuses values that would silently weaken anti-cheat or redirect tr
     [{ PORT: '3000junk' }, /Invalid PORT/],
     [{ PORT: '0' }, /Invalid PORT/],
     [{ PORT: '65536' }, /Invalid PORT/],
-    [{ FLOOR_PRACTICE_MS: '699' }, /Invalid FLOOR_PRACTICE_MS/],
-    [{ FLOOR_SIM_MS: '699' }, /Invalid FLOOR_SIM_MS/],
+    [{ FLOOR_PRACTICE_MS: '399' }, /Invalid FLOOR_PRACTICE_MS/],
+    [{ FLOOR_SIM_MS: '399' }, /Invalid FLOOR_SIM_MS/],
     [{ FLOOR_SIM_MS: '61001' }, /Invalid FLOOR_SIM_MS/],
     [{ SESSION_TTL_MS: '0' }, /Invalid SESSION_TTL_MS/],
     [{ OAUTH_STATE_TTL_MS: '0' }, /Invalid OAUTH_STATE_TTL_MS/],
@@ -750,10 +750,10 @@ test('config refuses values that would silently weaken anti-cheat or redirect tr
 
   const engineFloors = loadConfig({
     ...TEST_ENV,
-    FLOOR_PRACTICE_MS: '700',
-    FLOOR_SIM_MS: '700',
+    FLOOR_PRACTICE_MS: '400',
+    FLOOR_SIM_MS: '400',
   });
-  assert.deepEqual(engineFloors.floors, { practice: 700, simulation: 700 });
+  assert.deepEqual(engineFloors.floors, { practice: 400, simulation: 400 });
 
   const localDevelopment = loadConfig({
     ...TEST_ENV,

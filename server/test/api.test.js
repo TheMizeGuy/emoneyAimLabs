@@ -506,23 +506,29 @@ test('legitimate runs at and around the floors are accepted', async (t) => {
   assert.equal(await ctx.store.countRejections(), 0, 'honest play leaves no audit trail');
 });
 
-test('a clean sub-two-second Chase is not rejected by an invented heartbeat floor', async (t) => {
+test('the server accepts a 400 ms Chase while 399 ms remains below the floor', async (t) => {
   const ctx = await createContext({
-    env: { FLOOR_PRACTICE_MS: '700', FLOOR_SIM_MS: '700' },
+    env: { FLOOR_PRACTICE_MS: '400', FLOOR_SIM_MS: '400' },
   });
   t.after(() => ctx.close());
   await ctx.seedUser('1', 'honest');
   const client = ctx.clientFor('1');
 
-  // A real browser run in this repository completed cleanly at 1.839 s. It can
-  // only carry the immediate Chase beat before it wins.
-  const practice = await playRun(ctx, client, 'practice', 1839);
+  // A sub-cadence Chase carries only its immediate phase-stamp beat. That is
+  // enough for both modes; the explicit floor remains the deciding boundary.
+  const practice = await playRun(ctx, client, 'practice', 400);
   assert.equal(practice.submitted.status, 200, JSON.stringify(practice.submitted.json));
 
-  // Simulation has ample Flappy liveness, then the phase-stamp beat is the first
-  // Chase witness even when it arrives soon after the last Flappy beat.
-  const simulation = await playRun(ctx, client, 'simulation', 1839, { flappyMs: 15922 });
+  const simulation = await playRun(ctx, client, 'simulation', 400, { flappyMs: 15922 });
   assert.equal(simulation.submitted.status, 200, JSON.stringify(simulation.submitted.json));
+
+  const practiceTooFast = await playRun(ctx, client, 'practice', 399);
+  assert.equal(practiceTooFast.submitted.status, 400);
+  assert.equal(practiceTooFast.submitted.json.error, 'below_floor');
+
+  const simulationTooFast = await playRun(ctx, client, 'simulation', 399, { flappyMs: 15922 });
+  assert.equal(simulationTooFast.submitted.status, 400);
+  assert.equal(simulationTooFast.submitted.json.error, 'below_floor');
 });
 
 test('a long claim without heartbeats is rejected for liveness', async (t) => {

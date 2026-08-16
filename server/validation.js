@@ -60,7 +60,7 @@ const LIMITS = Object.freeze({
   BEAT_SLACK: 1,
   // A clean Chase can finish after its first server-witnessed beat. Requiring
   // two paced beats imposed an undocumented four-second minimum on a client
-  // whose actual arming gate is 700 ms.
+  // whose actual arming gate is 400 ms.
   MIN_CREDITED_BEATS: 1,
   // The most recent credited beat must be this fresh at the moment the score
   // is posted, so beats have to straddle the chase window instead of bunching

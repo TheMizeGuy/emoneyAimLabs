@@ -110,7 +110,7 @@ consumes the run and records the score exactly once.
 | DB-02 | Medium | Fixed | Connection-string query options override explicit node-postgres pool options. `DATABASE_URL` now rejects every query parameter, preventing `ssl=0`, host replacement, and other hidden policy overrides. Public hosts require verified TLS/channel binding; Railway private hosts use the encrypted private network. |
 | API-01 | Medium | Fixed | The 4 KB JSON cap applied only under `/api`; `/auth/logout` and unknown state-changing paths accepted larger bodies. The parser/cap now covers every JSON-bearing route after the CSRF wall. |
 | CFG-01 | Medium | Fixed | Partial integers, unknown booleans, public HTTP origins, unsafe return paths, weak secrets, invalid ports/TTLs/floors, empty salts, and ambiguous database URLs did not all fail closed. Exact bounded parsing now rejects them at boot. |
-| AC-08 | Low | Fixed | A two-beat clamp imposed a hidden four-second minimum despite a 700 ms engine arming gate. One fresh chained witness is now sufficient for a short Chase; honest 1839 ms Practice and Simulation regressions pass. |
+| AC-08 | Low | Fixed | A two-beat clamp imposed a hidden four-second minimum despite the engine arming gate (formerly 700 ms, now 400 ms). One fresh chained witness is sufficient for a short Chase; exact 400 ms Practice and Simulation server boundaries are covered end to end. |
 | SEC-01 | Low | Risk accepted by owner | Railway configuration inspection displayed three live credential values in this private local transcript. Repository, history, application-log, and report scans are clean. The owner treats local transcripts as trusted storage and does not require rotation; rotate if this transcript is shared/exported or the local-access model changes. |
 | AC-09 | Low | Fixed | A future `last_beat_at` timestamp produced a negative age that passed freshness. Negative heartbeat age now fails closed. |
 | AC-10 | Low | Fixed as friction | Flappy accepted ordinary script-dispatched pointer/touch/key events. It now rejects events not marked trusted, matching Chase-side defenses. CDP/WebDriver remains a stated residual. |
@@ -126,9 +126,10 @@ consumes the run and records the score exactly once.
 - The earliest deterministic Simulation handoff is 15.922 seconds: 250 ms ready lock, 15.072
   seconds to clear ten pipes, and a 600 ms victory handoff. The 12-second server-observed Flappy
   minimum leaves under four seconds for cold run-registration latency.
-- Chase can be configured down to the engine's 700 ms arming gate. A real browser completed a clean
-  win in 1.839 seconds, so the live 2-second floor can reject a legitimate fast result. Lowering the
-  floor also makes the protocol-only bypass faster; a floor is anomaly filtering, not gameplay proof.
+- Chase can be configured down to the engine's 400 ms arming gate. A real browser completed a clean
+  win in 1.839 seconds, so the former live 2-second floor could reject a legitimate fast result.
+  Lowering the floor also makes the protocol-only bypass faster; a floor is anomaly filtering, not
+  gameplay proof.
 - A claim may exceed the server-observed scored Chase duration by at most three seconds and may be
   shorter by at most 1.5 seconds for request timing. Practice subtracts only its server-timestamped
   puzzle interval. Required heartbeats cover that scored window, and the latest credited beat must
@@ -271,7 +272,7 @@ support for isolating a Pages site: [GitHub Pages custom domains](https://docs.g
 | Dependency state | `npm audit`: 0 vulnerabilities across 104 packages; `npm outdated`: empty. |
 | Browser runtime | Against the old gate, a native browser-input locator loop won Practice in 3.638 s. Exact boundary matching initially solved 98% of three-round raster runs; candidate masking and piece transformation reduced that regression to chance. A controlled browser/vision attempt then solved all three hardened rounds, proving the human-vs-bot residual. Four rounds now ship. The page produced Practice challenge timing inside the 0.5-1.8 s window, kept small viewports paused without refunding wall time, and rendered Simulation at 128 x 93 versus Practice at 136 x 172. |
 | Direct-protocol adversarial probe | Against the preceding client-answer design, a modified authenticated client emitted the signed lifecycle and waited 700 ms without Chase; the server returned HTTP 200/rank 1. The current no-answer and wrong-answer versions are rejected and cannot qualify a run. AC-13/API6 remains because the controlled vision attempt recovered the server-owned answers. |
-| Physics | Deterministic earliest Simulation handoff: 15.922 s; honest 1.839 s Chase regression accepted at a 700 ms source floor. |
+| Physics | Deterministic earliest Simulation handoff: 15.922 s; exact 400 ms Practice and Simulation API boundaries pass, while the measured clean browser run remains 1.839 s. |
 | Pre-release production data | Read-only PostgreSQL checks: 0 duplicate open users, 0 invalid run-state/counter groups observed, 0 orphan submission rows, and 0 submission rows incompatible with new constraints. No records were altered during the audit. |
 | Production API rollout | Railway deployment `308cf46c-1d36-4ca9-a7d4-c48b3773a239` reached `SUCCESS`; boot logged `schema ready`, `/healthz` returned 200 with hardened headers, the allowed-origin leaderboard returned 200, all five new challenge/retry columns and three state constraints were present, and both post-migration invariant queries returned zero invalid rows. |
 | Secret scans | Current tree and complete git history: no AWS/GitHub/OpenAI/Slack/PEM pattern match and no tracked `.env`/private-key file. The owner accepts private-transcript storage under the declared threat model. |
