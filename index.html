@@ -16,9 +16,10 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "f726c8f1fa7acfbb96273b69776c47c242d3b8db28902a4e0828f412dfecef50",
-  "js/flappy.js": "5c5ae3a6186cd385611eee1d2fdcaf4b1ab1b821541618b310047fb92329c382",
-  "js/main.js": "bb045cbbfec923513a51fc2a58b9fbed1b58829644dd4a0140bbe6ea32af0eb2"
+  "js/chase.js": "45452ba99c454589ace3e83f8f302762c679ce6ffbb2efe093d332a04775c501",
+  "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
+  "js/net.js": "ec923b7f33807ade4dcd7a2ca345ee51195018431f8847c781608a57269756ed",
+  "js/main.js": "aaaad2c6f84ccabb01b770acf32bdebd9ffe1a1a1f7920efc19c0b48dbe97832"
 }
 </script>
 <style>
@@ -95,13 +96,20 @@
     inset: 0;
     z-index: 80;
     display: flex;
-    align-items: center;
+    /* A centred flex item that outgrows its container overflows the START edge,
+       which a scroll container can never reach -- so once the activity log made
+       the card taller than the viewport, the Win95 title bar was clipped away
+       and no amount of scrolling brought it back. Auto margins centre it while
+       it fits and yield to the padding when it does not. */
+    align-items: flex-start;
     justify-content: center;
     padding: 24px 24px 52px;
     background: var(--w95-desk);
     cursor: default;
     overflow: auto;
   }
+
+  .startcard { margin: auto; }
 
   .start.hide { display: none; }
 
@@ -247,6 +255,625 @@
     color: #7a0000;
     font-weight: 700;
   }
+
+  /* ---- V3: account strip and leaderboard, same Win95 language ---- */
+
+  .acct {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 26px;
+    margin: 0 0 14px;
+    padding: 0 0 12px;
+    border-bottom: 1px solid var(--w95-shadow);
+    box-shadow: 0 1px 0 var(--w95-light);
+    flex-wrap: wrap;
+  }
+
+  /* the generic Win95 button, shared by the account strip and the leaderboard */
+  .w95btn {
+    padding: 5px 12px;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    border-radius: 0;
+    box-shadow: inset 1px 1px 0 var(--w95-hilite), inset -1px -1px 0 var(--w95-shadow);
+    color: #000;
+    font-family: var(--w95);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .w95btn:active {
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+    box-shadow: inset 1px 1px 0 var(--w95-shadow), inset -1px -1px 0 var(--w95-hilite);
+  }
+
+  .w95btn:focus-visible { outline: 1px dotted #000; outline-offset: -5px; }
+  .w95btn.hide, .acctin.hide, .acctnote.hide { display: none; }
+
+  .acctin {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .acctav {
+    display: block;
+    width: 22px;
+    height: 22px;
+    border: 1px solid var(--w95-shadow);
+    background: var(--w95-face);
+  }
+
+  .acctname {
+    font-family: var(--w95);
+    font-size: 12px;
+    font-weight: 700;
+    color: #000;
+  }
+
+  .linkbtn {
+    padding: 2px 4px;
+    border: 0;
+    background: none;
+    color: #3d3d3d;
+    font-family: var(--w95);
+    font-size: 11px;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .acctnote {
+    font-family: var(--w95);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #3d3d3d;
+  }
+
+  /* V3.1 tab strip, proper Win95 geometry: the active tab grows 2px, loses its
+     bottom edge and overlaps the panel border, so the two become one surface. */
+  .tabstrip {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    margin: 0 0 0 2px;
+    position: relative;
+    z-index: 2;
+  }
+
+  .tab {
+    padding: 4px 14px 3px;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-face) var(--w95-light);
+    border-radius: 0;
+    color: #3d3d3d;
+    font-family: var(--w95);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+  }
+
+  .tab.on {
+    padding: 7px 16px 5px;
+    margin-bottom: -2px;          /* paints over the panel's top border */
+    color: #000;
+    position: relative;
+    z-index: 3;
+  }
+
+  .tab:focus-visible { outline: 1px dotted #000; outline-offset: -5px; }
+
+  .panel {
+    padding: 14px 0 0;
+    border-top: 2px solid var(--w95-light);
+  }
+
+  .panel.hide { display: none; }
+
+  /* ---- Explorer details view ---- */
+
+  /* The sunken pane scrolls BOTH axes, and the column header lives inside it
+     rather than above it. That is what Explorer did, and it buys two things:
+     the header and the rows resolve against one content box (so they cannot
+     drift apart when a scrollbar appears), and a sideways scroll carries the
+     header along with the data instead of stranding it. */
+  .lblist {
+    height: 244px;
+    overflow: auto;
+    padding: 1px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #fff;
+    font-family: var(--w95);
+    font-size: 12px;
+    color: #000;
+    text-align: left;
+  }
+
+  /* Six columns do not fit a 360px phone. Rather than crush them, the track
+     holds its width and the pane scrolls -- also period-correct. */
+  .lbhead,
+  .lbbody { min-width: 428px; }
+
+  .lbhead {
+    display: flex;
+    align-items: stretch;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--w95-face);
+  }
+
+  /* each header is its own raised button, exactly as Explorer drew them */
+  .lbcol {
+    padding: 3px 6px;
+    background: var(--w95-face);
+    border: 1px solid;
+    border-color: var(--w95-light) var(--w95-shadow) var(--w95-shadow) var(--w95-light);
+    font-family: var(--w95);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #000;
+    white-space: nowrap;
+    overflow: hidden;
+    box-sizing: border-box;
+  }
+
+  /* one shared column geometry, so headers and rows line up to the pixel */
+  .lbrank   { flex: none; width: 44px; text-align: right; }
+  .lbname   { flex: 1 1 auto; min-width: 92px; text-align: left; }
+  .lbtime   { flex: none; width: 76px; text-align: right; }
+  .lbclicks { flex: none; width: 58px; text-align: right; }
+  .lbfails  { flex: none; width: 54px; text-align: right; }
+  .lbbird   { flex: none; width: 48px; text-align: right; }
+  .lbchase  { flex: none; width: 56px; text-align: right; }
+
+  .lbrow {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 1px 0;
+  }
+
+  /* the selection bar, the way a selected file row looked */
+  .lbrow.you { background: var(--w95-title); color: #fff; }
+
+  .lbrow .lbrank,
+  .lbrow .lbtime,
+  .lbrow .lbclicks,
+  .lbrow .lbfails,
+  .lbrow .lbbird,
+  .lbrow .lbchase { padding: 1px 6px; box-sizing: border-box; font-variant-numeric: tabular-nums; }
+  .lbrow .lbtime { font-family: var(--mono); font-size: 11.5px; }
+
+  .lbrow .lbname {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 1px 6px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .lbnametext {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  /* 16x16 all-in, sat next to the name like a file icon. border-box matters:
+     without it the 1px border pushes the icon to 18px and the names step out
+     of line with the header. */
+  .lbav {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    box-sizing: border-box;
+    border: 1px solid var(--w95-shadow);
+    background: var(--w95-face);
+  }
+
+  .lbrow.you .lbav { border-color: var(--w95-light); }
+
+  /* the status strip along the bottom of the pane */
+  .lbstatus {
+    margin: 3px 0 0;
+    padding: 3px 7px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: var(--w95-face);
+    font-family: var(--w95);
+    font-size: 11px;
+    color: #000;
+    text-align: left;
+    min-height: 20px;
+    box-sizing: border-box;
+  }
+
+  .lbempty {
+    padding: 20px 6px;
+    color: #3d3d3d;
+    text-align: center;
+  }
+
+  /* the loading state, with the era's own idea of "working" */
+  .lbwait {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    padding: 26px 6px;
+    color: #3d3d3d;
+  }
+
+  .hourglass {
+    position: relative;
+    width: 12px;
+    height: 17px;
+    flex: none;
+  }
+
+  .hourglass::before,
+  .hourglass::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    width: 0;
+    height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+  }
+
+  .hourglass::before { top: 0; border-top: 8px solid #3d3d3d; }
+  .hourglass::after { bottom: 0; border-bottom: 8px solid #3d3d3d; }
+
+  .lb {
+    position: fixed;
+    inset: 0;
+    z-index: 85;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 34, 34, 0.55);
+  }
+
+  .lb.hide { display: none; }
+  .lb .ovcard { width: min(420px, 100%); }
+
+  .lbtabs {
+    display: flex;
+    gap: 4px;
+    margin: 0 0 10px;
+  }
+
+  .lbtab {
+    padding: 5px 14px;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    border-radius: 0;
+    color: #3d3d3d;
+    font-family: var(--w95);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  /* the selected tab reads as pressed in, the way Win95 tabs did */
+  .lbtab.on {
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+    color: #000;
+    font-weight: 700;
+  }
+
+  /* The details view above is shared by both mounts -- the modal reuses it
+     wholesale, so there is deliberately no second copy of those rules here.
+     (There used to be one, and being later in the sheet it quietly won the
+     cascade and knocked the header out of line with the rows.) */
+
+  .lbclose { margin-top: 12px; width: 100%; }
+
+  /* ---- V3.5: the activity log, in the shape of Event Viewer -------------- */
+
+  .feed {
+    margin: 16px 0 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--w95-shadow);
+    box-shadow: 0 -1px 0 var(--w95-light) inset;
+    text-align: left;
+  }
+
+  .feedhead {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 0 5px;
+  }
+
+  .feedtitle {
+    font-family: var(--w95);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #000;
+  }
+
+  /* the connection state is a status word, never an error banner */
+  .feedstate {
+    font-family: var(--w95);
+    font-size: 10.5px;
+    letter-spacing: 0.04em;
+    color: #3d3d3d;
+  }
+
+  .feedlist {
+    height: 132px;
+    overflow-y: auto;
+    padding: 2px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #fff;
+  }
+
+  .feedline {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 2px 3px;
+    font-family: var(--w95);
+    font-size: 11.5px;
+    line-height: 1.35;
+    color: #000;
+  }
+
+  /* newest arrives at the top, so the eye does not have to chase it */
+  .feedline + .feedline { border-top: 1px solid #ededed; }
+
+  .feedtime {
+    flex: none;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: #3d3d3d;
+  }
+
+  .feedtext { flex: 1 1 auto; min-width: 0; }
+
+  /* Event Viewer marked every row with its severity; so does this */
+  .fi {
+    flex: none;
+    position: relative;
+    top: 1px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    font-family: var(--w95);
+    font-size: 8px;
+    font-weight: 700;
+    line-height: 11px;
+    text-align: center;
+    color: #fff;
+  }
+
+  .fi-i   { background: #000080; }
+  .fi-win { background: #006400; }
+  .fi-w   { background: #8a6d00; }
+  .fi-e   { background: #7a0000; }
+
+  /* a player's name is a link into their properties, in both surfaces */
+  .pname {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: #000080;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .pname:hover { color: #0000c0; }
+  .pname:focus-visible { outline: 1px dotted #000; }
+
+  .lbrow .pname { color: inherit; text-decoration: none; text-align: left; }
+  .lbrow.you .pname { color: #fff; }
+  .lbrow .pname:hover { text-decoration: underline; }
+
+  .feedempty {
+    padding: 16px 6px;
+    font-family: var(--w95);
+    font-size: 11.5px;
+    color: #3d3d3d;
+    text-align: center;
+  }
+
+  /* ---- V3.5: the Properties dialog -------------------------------------- */
+
+  .props {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.45);
+    cursor: default;
+  }
+
+  .props.hide { display: none; }
+
+  .propcard {
+    width: min(400px, 100%);
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-hilite) var(--w95-dark) var(--w95-dark) var(--w95-hilite);
+    box-shadow: inset 2px 2px 0 var(--w95-light), inset -2px -2px 0 var(--w95-shadow);
+    color: #000;
+  }
+
+  .propbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 26px;
+    margin: 3px 3px 0;
+    padding: 0 3px 0 8px;
+    background: var(--w95-title);
+  }
+
+  .propbartitle {
+    font-family: var(--w95);
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+  }
+
+  /* the caption close box, drawn the way the chase window draws its own */
+  .propx {
+    width: 20px;
+    height: 18px;
+    padding: 0;
+    background: var(--w95-face);
+    border: 2px solid;
+    border-color: var(--w95-light) var(--w95-dark) var(--w95-dark) var(--w95-light);
+    border-radius: 0;
+    color: #000;
+    font-family: var(--w95);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .propx:active {
+    border-color: var(--w95-dark) var(--w95-light) var(--w95-light) var(--w95-dark);
+  }
+
+  .propbody { padding: 14px 14px 12px; }
+
+  /* identity block: big icon, name, the way a file's properties opened */
+  .propid {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 0 0 11px;
+    border-bottom: 1px solid var(--w95-shadow);
+    box-shadow: 0 1px 0 var(--w95-light);
+  }
+
+  .propav {
+    flex: none;
+    width: 32px;
+    height: 32px;
+    box-sizing: border-box;
+    border: 1px solid var(--w95-shadow);
+    background: var(--w95-face);
+  }
+
+  .propname {
+    margin: 0;
+    font-family: var(--w95);
+    font-size: 14px;
+    font-weight: 700;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .propsub {
+    margin: 2px 0 0;
+    font-family: var(--w95);
+    font-size: 11px;
+    color: #3d3d3d;
+  }
+
+  /* the stats read as a properties sheet: label, then value, ruled faintly */
+  .propgrid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 12px;
+    margin: 11px 0 0;
+    font-family: var(--w95);
+    font-size: 12px;
+  }
+
+  .propk { color: #3d3d3d; }
+  .propv { text-align: right; font-variant-numeric: tabular-nums; }
+  .propv.mono { font-family: var(--mono); font-size: 11.5px; }
+
+  .proplabel {
+    margin: 13px 0 4px;
+    font-family: var(--w95);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #000;
+  }
+
+  .proplist {
+    height: 128px;
+    overflow-y: auto;
+    padding: 2px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #fff;
+  }
+
+  .prow {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 2px 4px;
+    font-family: var(--w95);
+    font-size: 11.5px;
+  }
+
+  .prow + .prow { border-top: 1px solid #ededed; }
+
+  .poutcome { flex: none; width: 52px; font-weight: 700; }
+  .poutcome.won  { color: #006400; }
+  .poutcome.lost { color: #7a0000; }
+  .poutcome.open { color: #3d3d3d; }
+
+  .ptime {
+    flex: none;
+    width: 62px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .pwhy {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: #3d3d3d;
+  }
+
+  .pwhen { flex: none; color: #3d3d3d; font-size: 10.5px; }
+
+  .propok { margin: 12px 0 0; width: 100%; }
+
+  /* the win dialog's backend line */
+  .ovnet {
+    margin: 10px 0 0;
+    font-family: var(--w95);
+    font-size: 12px;
+    color: #000080;
+  }
+
+  .ovnet.hide, .again.hide { display: none; }
 
   /* ---- a slim taskbar, for flavour only ---- */
   .taskbar {
@@ -1000,6 +1627,34 @@
 
   .ovsus.hide { display: none; }
 
+  /* V3.4 block 4b: the checks that tripped, named. Sunken like a Win95 details
+     box, so it reads as the system reporting rather than the page scolding. */
+  .ovsuslist {
+    margin: -8px 0 10px;
+    padding: 6px 8px 6px 24px;
+    border: 2px solid;
+    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
+    background: #fff;
+    font-family: var(--w95);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: #7a0000;
+    text-align: left;
+    list-style: square;
+  }
+
+  .ovsuslist.hide { display: none; }
+
+  .ovsusnote {
+    margin: 0 0 14px;
+    font-family: var(--w95);
+    font-size: 11.5px;
+    font-weight: 700;
+    color: #000;
+  }
+
+  .ovsusnote.hide { display: none; }
+
   .again {
     width: 100%;
     padding: 9px 14px;
@@ -1040,25 +1695,121 @@
   <div class="startcard">
     <div class="startbar"><span class="startbartitle">INCIDENT.EXE</span></div>
     <div class="startbody">
-      <div class="hero">
-        <p class="herotitle">Relive the August 14th Incident</p>
-        <p class="herotag">Experience 4DX simulation like never before</p>
-        <span class="heroframe">
-          <img class="heroclip" src="./assets/4dx.avif" alt="simulation footage" width="440" height="320">
+      <div class="acct" id="acct">
+        <button class="w95btn" id="btnLogin" type="button">Sign in with Twitch</button>
+        <span class="acctin hide" id="acctIn">
+          <img class="acctav" id="acctAvatar" alt="" width="22" height="22">
+          <span class="acctname" id="acctName"></span>
+          <button class="linkbtn" id="btnLogout" type="button">log out</button>
         </span>
+        <span class="acctnote hide" id="acctNote">OFFLINE</span>
       </div>
 
-      <h1 class="starttitle">eMoney Aim Labs</h1>
-      <p class="startpitch">A popup with survival instincts. Land the close button.</p>
+      <div class="tabstrip">
+        <button class="tab on" id="tabGame" type="button">GAME</button>
+        <button class="tab" id="tabBoard" type="button">LEADERBOARD</button>
+      </div>
 
-      <button class="mode" id="btnPractice" type="button">Practice Mode</button>
-      <p class="modenote">Straight to the chase. Timed, silent, one window between you and a clean desktop.</p>
+      <div class="panel" id="panelGame">
+        <div class="hero">
+          <p class="herotitle">Relive the August 14th Incident</p>
+          <p class="herotag">Experience 4DX simulation like never before</p>
+          <span class="heroframe">
+            <img class="heroclip" src="./assets/4dx.avif" alt="simulation footage" width="440" height="320">
+          </span>
+        </div>
 
-      <button class="mode loud" id="btnSimulation" type="button">Simulation (LOUD!)</button>
-      <p class="modenote warn last">Warning: this one plays loud audio. Turn your volume down first.</p>
+        <h1 class="starttitle">eMoney Aim Labs</h1>
+        <p class="startpitch">A popup with survival instincts. Land the close button.</p>
+
+        <button class="mode" id="btnPractice" type="button">Practice Mode</button>
+        <p class="modenote">Straight to the chase. Timed, silent, one window between you and a clean desktop.</p>
+
+        <button class="mode loud" id="btnSimulation" type="button">Simulation (LOUD!)</button>
+        <p class="modenote warn last">Warning: this one plays loud audio. Turn your volume down first.</p>
+
+        <!-- V3.5: the public activity feed, present on the landing tab without
+             any interaction. Fed by SSE; quiet when the stream is not up. -->
+        <div class="feed">
+          <div class="feedhead">
+            <span class="feedtitle">Activity Log</span>
+            <span class="feedstate" id="feedState">Connecting...</span>
+          </div>
+          <div class="feedlist" id="feedList"></div>
+        </div>
+      </div>
+
+      <div class="panel hide" id="panelBoard">
+        <div class="lbtabs">
+          <button class="lbtab on" id="bdPractice" type="button">Practice</button>
+          <button class="lbtab" id="bdSim" type="button">Simulation</button>
+        </div>
+        <div class="lblist">
+          <div class="lbhead">
+            <span class="lbcol lbrank">RANK</span>
+            <span class="lbcol lbname">PLAYER</span>
+            <span class="lbcol lbtime">TIME</span>
+            <span class="lbcol lbclicks">CLICKS</span>
+            <span class="lbcol lbfails">FAILS</span>
+            <span class="lbcol lbbird">BIRD</span>
+            <span class="lbcol lbchase">CHASE</span>
+          </div>
+          <div class="lbbody" id="boardList"></div>
+        </div>
+        <div class="lbstatus" id="boardStatus"></div>
+      </div>
     </div>
   </div>
   <div class="taskbar" aria-hidden="true"><span class="taskbtn">INCIDENT.EXE</span></div>
+</div>
+
+<div class="lb hide" id="lbBox">
+  <div class="ovcard">
+    <div class="ovbar"><span class="ovbartitle">Leaderboard</span></div>
+    <div class="ovbody">
+      <div class="lbtabs">
+        <button class="lbtab on" id="lbTabPractice" type="button">Practice</button>
+        <button class="lbtab" id="lbTabSim" type="button">Simulation</button>
+      </div>
+      <div class="lblist">
+        <div class="lbhead">
+          <span class="lbcol lbrank">RANK</span>
+          <span class="lbcol lbname">PLAYER</span>
+          <span class="lbcol lbtime">TIME</span>
+          <span class="lbcol lbclicks">CLICKS</span>
+          <span class="lbcol lbfails">FAILS</span>
+          <span class="lbcol lbbird">BIRD</span>
+          <span class="lbcol lbchase">CHASE</span>
+        </div>
+        <div class="lbbody" id="lbList"></div>
+      </div>
+      <div class="lbstatus" id="lbStatus"></div>
+      <button class="w95btn lbclose" id="lbClose" type="button">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- V3.5: player Properties. Opened from a leaderboard row or a feed name. -->
+<div class="props hide" id="props">
+  <div class="propcard">
+    <div class="propbar">
+      <span class="propbartitle" id="propTitle">Properties</span>
+      <button class="propx" id="propX" type="button" aria-label="Close">X</button>
+    </div>
+    <div class="propbody">
+      <div class="propid">
+        <img class="propav" id="propAv" alt="" width="32" height="32">
+        <span>
+          <p class="propname" id="propName"></p>
+          <p class="propsub" id="propSub"></p>
+        </span>
+      </div>
+      <div class="propgrid" id="propStats"></div>
+      <p class="proplabel">Recent runs</p>
+      <div class="proplist" id="propRuns"></div>
+      <button class="w95btn propok" id="propOk" type="button">OK</button>
+    </div>
+  </div>
 </div>
 
 <div class="stage" id="stage"></div>
@@ -1066,6 +1817,7 @@
 <script src="./js/sentinel.js"></script>
 <script src="./js/chase.js"></script>
 <script src="./js/flappy.js"></script>
+<script src="./js/net.js"></script>
 <script src="./js/main.js"></script>
 </body>
 </html>

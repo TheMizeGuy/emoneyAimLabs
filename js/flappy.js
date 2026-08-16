@@ -196,8 +196,17 @@
    * The window is now short, rolls across deaths (intervals that span a death
    * are skipped, not counted), and the threshold sits between a frame-quantised
    * bot (~3 %) and the least variable plausible human (10 %+). */
-  var CADENCE_MIN_INTERVALS = 12;    /* rolling window, not a whole-run total */
-  var CADENCE_CV = 0.05;             /* below this a human is not driving */
+  /* F6. The old threshold (CV < 5%, 12 intervals, population SD, latching across
+   * deaths) sat INSIDE the human range: isochronous finger tapping is 3-6%, and
+   * a run measured at 4.6% was flagged -- in a game whose evenly spaced pipes
+   * actively teach that rhythm. Under the V3.4b absolute gate one steady stretch
+   * of twelve taps then silently voided the player's whole simulation score.
+   * Now: a longer window, sample SD, a CV no hand reaches, and an independent
+   * absolute-spread condition. A human tapping near 300 ms at even 3% CV spreads
+   * ~30 ms across twenty taps; a timer spreads two or three. */
+  var CADENCE_MIN_INTERVALS = 20;    /* rolling window, not a whole-run total */
+  var CADENCE_CV = 0.015;            /* below this a human is not driving */
+  var CADENCE_SPREAD_MS = 12;        /* ...and the raw max-min must be this tight too */
   var CADENCE_MIN_GAP = 30;          /* ms; below this it is one tap counted twice */
   var NOTE_SECONDS = 3;              /* how long a detection stays on the canvas */
 
@@ -562,6 +571,10 @@
     var targetScore = typeof opts.targetScore === 'number' && opts.targetScore > 0
       ? Math.floor(opts.targetScore) : 10;
     var onComplete = typeof opts.onComplete === 'function' ? opts.onComplete : null;
+    /* V3.2: optional, additive. Fires once per death so the shell can report the
+       flappy-fail counter. Guarded exactly like onComplete -- a throwing caller
+       must never wedge the loop. */
+    var onDeath = typeof opts.onDeath === 'function' ? opts.onDeath : null;
 
     var doc = container.ownerDocument || document;
     var win = doc.defaultView || window;
@@ -660,23 +673,31 @@
       note('SCORE STATE MISMATCH');
     }
 
-    /* A person cannot hold twenty taps to a two percent coefficient of variation
-     * and a timer cannot help doing it, so the threshold sits in a gap nobody
-     * playing by hand can reach. It never blocks, resets or costs a life. */
+    /* Two independent conditions, both of which a timer meets and neither of
+     * which a hand does. It never blocks, resets or costs a life. */
     function cadenceCheck() {
       if (cadenceFlagged) { return; }
       var n = intervals.length;
       if (n < CADENCE_MIN_INTERVALS) { return; }
-      var i, d, sum = 0;
-      for (i = 0; i < n; i++) { sum += intervals[i]; }
+      var i, d, sum = 0, lo = intervals[0], hi = intervals[0];
+      for (i = 0; i < n; i++) {
+        sum += intervals[i];
+        if (intervals[i] < lo) { lo = intervals[i]; }
+        if (intervals[i] > hi) { hi = intervals[i]; }
+      }
       var mean = sum / n;
       if (!(mean > 0)) { return; }
+      /* Absolute spread, independent of the mean: no rounding of a human's
+       * timing lands twenty taps inside a twelve-millisecond band. */
+      if (hi - lo >= CADENCE_SPREAD_MS) { return; }
       var vsum = 0;
       for (i = 0; i < n; i++) {
         d = intervals[i] - mean;
         vsum += d * d;
       }
-      if (Math.sqrt(vsum / n) / mean >= CADENCE_CV) { return; }
+      /* Sample standard deviation: dividing by n under-estimates the spread of
+       * a sample and biased the old test further toward firing. */
+      if (Math.sqrt(vsum / (n - 1)) / mean >= CADENCE_CV) { return; }
       cadenceFlagged = true;
       sus('cadence');
       note('METRONOME DETECTED');
@@ -714,9 +735,10 @@
     function resetRun() {
       world = makeWorld(Math.random);
       shScore = newShadow('score', 0, onDiverge);
-      /* intervals deliberately survive: cadence is a property of whatever is
-       * driving the input, not of a single run. lastFlapT resets so the long
-       * gap across a death is never counted as an interval. */
+      /* F6. Intervals used to survive a death, so a whole session could be read
+       * as one rhythm and any twenty steady taps anywhere in it condemned the
+       * run. A death is a genuine break in the input; the window starts again. */
+      intervals.length = 0;
       lastFlapT = 0;
       view.tilt = 0;
       view.tiltHold = 0;
@@ -839,6 +861,10 @@
           if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }
           view.flash = 1;
           setState('dead');
+          if (onDeath) {
+            try { onDeath(shScore.get()); }
+            catch (e) { WARNF('[AIMLAB] FLAPPY onDeath threw: ' + (e && e.message)); }
+          }
         } else if (shScore.get() >= targetScore) {
           log('[AIMLAB] FLAPPY DONE');
           if (shScore.get() > sessionBest) { sessionBest = shScore.get(); }

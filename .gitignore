@@ -4,3 +4,17 @@
 .DS_Store
 .playwright-mcp/
 /*.png
+.env
+.env.*
+!.env.example
+node_modules/
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.sql
+*.dump
+*.log
+.idea/
+.vscode/

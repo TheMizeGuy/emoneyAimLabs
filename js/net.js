@@ -1,0 +1,317 @@
+/* eMoney Aim Labs -- backend client.
+
+   Every call to the V3 API goes through here. The single rule this file exists
+   to enforce is SILENT DEGRADATION: if the backend is missing, unreachable,
+   slow, or returns something unexpected, the game must play exactly as it did
+   before there was a backend. No throw escapes, no console noise, no blocked
+   frame. Every helper resolves to a value or to null, never rejects.
+
+   Two states count as "no backend":
+     - API_BASE still carries the deploy placeholder. In that state this file
+       makes NO network request at all. The domain is baked in now, so this is
+       the escape hatch rather than the shipped state.
+     - a request fails, times out, or answers with a non-2xx. The first outright
+       failure puts every helper to sleep for COOLDOWN_MS, so a dead backend
+       costs one request rather than one per heartbeat.
+
+   Nothing secret lives here. API_BASE and the Twitch redirect are public by
+   nature: the OAuth exchange, the client secret and the session HMAC are all
+   server-side. The only credential this file handles is the httpOnly session
+   cookie, which JavaScript cannot read -- it rides along because every request
+   is sent with credentials: 'include'.
+
+   The only global is window.AimlabNet, frozen.
+*/
+(function () {
+  'use strict';
+
+  var API_BASE = 'https://emoney-aimlabs-api-production.up.railway.app';
+
+  /* Captured at parse time, same doctrine as the rest of the engine. */
+  var W = window;
+  var FETCH = W.fetch ? W.fetch.bind(W) : null;
+  var DELAY = W.setTimeout.bind(W);
+  var UNDELAY = W.clearTimeout.bind(W);
+
+  var TIMEOUT_MS = 6000;        // no API call may hold the game up longer than this
+  var PLACEHOLDER = 'REPLACE-ME';
+
+  // The deploy step patches API_BASE; until then there is nothing to talk to.
+  var CONFIGURED = (API_BASE.indexOf(PLACEHOLDER) < 0) && !!FETCH;
+
+  /* Once a call fails outright we stop trying for a while, so a dead backend
+     costs one request rather than one per heartbeat. */
+  var COOLDOWN_MS = 30000;
+  var deadUntil = 0;
+
+  function offline() {
+    return !CONFIGURED || Date.now() < deadUntil;
+  }
+
+  function markDead() {
+    deadUntil = Date.now() + COOLDOWN_MS;
+  }
+
+  /* The one place a network error can occur, and it is swallowed here.
+     Resolves to the parsed body, or to null for every failure mode there is. */
+  function call(method, path, body, wantError) {
+    if (offline()) return Promise.resolve(null);
+
+    var ctrl = null;
+    try { if (W.AbortController) ctrl = new W.AbortController(); } catch (e) { ctrl = null; }
+
+    var opts = {
+      method: method,
+      credentials: 'include',
+      mode: 'cors',
+      cache: 'no-store'
+    };
+    if (ctrl) opts.signal = ctrl.signal;
+    /* The CSRF wall requires BOTH `credentials: 'include'` (above, always) and
+       Content-Type: application/json on every POST -- an HTML form cannot send
+       that header cross-origin without tripping a preflight, which is what makes
+       it a wall. It goes on bodyless POSTs too (logout is one); without it the
+       server answers 415, correctly. */
+    if (method !== 'GET') opts.headers = { 'Content-Type': 'application/json' };
+    if (body) opts.body = JSON.stringify(body);
+
+    var timer = 0;
+    var settled = false;
+
+    return new Promise(function (resolve) {
+      function done(v) {
+        if (settled) return;
+        settled = true;
+        UNDELAY(timer);
+        resolve(v);
+      }
+
+      timer = DELAY(function () {
+        try { if (ctrl) ctrl.abort(); } catch (e) { /* already gone */ }
+        markDead();
+        done(null);
+      }, TIMEOUT_MS);
+
+      var p;
+      try {
+        p = FETCH(API_BASE + path, opts);
+      } catch (e) {
+        markDead();
+        done(null);
+        return;
+      }
+
+      p.then(function (res) {
+        if (!res) { markDead(); return done(null); }
+        // 401 is a normal answer (not signed in), not a dead backend
+        if (res.status === 401) return done(null);
+        if (!res.ok) {
+          /* 7.1. Every non-2xx used to collapse into null, so a score the server
+             deliberately REFUSED was reported to the player as "the leaderboard
+             is offline" -- while the leaderboard was up and had just answered.
+             The server ships a human-readable message per code; callers that ask
+             for it get the refusal instead of a lie. A 5xx is still an outage. */
+          if (!wantError || res.status >= 500) return done(null);
+          return res.json().then(
+            function (j) { done({ refused: true, error: (j && j.error) || '', message: (j && j.message) || '' }); },
+            function () { done({ refused: true, error: '', message: '' }); });
+        }
+        if (res.status === 204) return done(true);
+        return res.json().then(function (j) { done(j); }, function () { done(null); });
+      }, function () {
+        markDead();
+        done(null);
+      });
+    });
+  }
+
+  /* ---------------- the API surface ---------------- */
+
+  // Where the browser goes to start the Twitch flow. Server-side from there on.
+  function loginUrl() {
+    return API_BASE + '/auth/twitch';
+  }
+
+  // null when signed out, when offline, or when anything at all goes wrong.
+  function me() {
+    return call('GET', '/api/me', null).then(function (u) {
+      return (u && u.id) ? u : null;
+    });
+  }
+
+  function logout() {
+    return call('POST', '/auth/logout', null).then(function () { return true; });
+  }
+
+  /* mode: 'practice' | 'simulation'. Resolves to {runId, nonce, chain}, or null.
+     V3.4: the server opens the run with a nonce and a genesis chain token; the
+     caller carries both through the heartbeats below. */
+  function startRun(mode) {
+    return call('POST', '/api/run', { mode: mode }).then(function (r) {
+      if (!r || !r.runId) return null;
+      return { runId: r.runId, nonce: r.nonce || '', chain: r.chain || '' };
+    });
+  }
+
+  /* V3.3: the path is /api/run/beat, and once the chase segment is live every beat
+     carries chase:true -- the server stamps the phase transition off the first
+     one it sees, so the caller sends it promptly at chase start. Crediting is
+     server-paced, so sending more of these buys nothing.
+
+     V3.4: each beat also presents the run nonce and the newest chain token, and
+     the reply carries the next token. Resolves to that token, or null when the
+     beat did not land -- on null the caller keeps the token it already holds
+     and re-presents it next time, which the server tolerates as a gap. */
+  function beat(runId, nonce, chain, inChase) {
+    // No token means nothing the server would accept: `chain` has to be a
+    // non-empty string or the body is refused outright.
+    if (!runId || !chain) return Promise.resolve(null);
+    return call('POST', '/api/run/beat', {
+      runId: runId,
+      nonce: nonce || runId,
+      chain: chain,
+      chase: !!inChase
+    }).then(function (r) {
+      /* 200 {chain, credited}. A stale token is still answered with the live
+         one, so the returned token is adopted whether or not this beat was
+         credited -- that is the resync path, and refusing it here would leave a
+         client that lost one response desynced for the rest of the run. */
+      return (r && r.chain) ? r.chain : null;
+    });
+  }
+
+  // Resolves to {bestMs, rank}, or null if the server refused or is unreachable.
+  // V3.3: the engine's sus counter and signed WIN line ride along as the
+  // client-attestation layer. Friction on top of the server's own witness.
+  function submitScore(runId, timeMs, misses, nearMisses, sus, sig) {
+    if (!runId) return Promise.resolve(null);
+    return call('POST', '/api/score', {
+      runId: runId,
+      timeMs: timeMs,
+      misses: misses,
+      nearMisses: nearMisses,
+      sus: sus,
+      sig: sig
+    }, true).then(function (r) {
+      if (!r) return null;                       // unreachable
+      if (r.refused) return r;                   // refused, with the server's own words
+      return (typeof r.rank !== 'undefined') ? r : null;
+    });
+  }
+
+  /* V3.2. Fire-and-forget vanity counter: the caller does not wait on it and
+     never sees a failure. Authed-only server-side, rate limited there, and
+     ignored entirely when signed out -- so this is safe to call unconditionally
+     from the death path.
+
+     V3.5 adds type:'ban' with a reason, which colours the feed line and the
+     player's run history. It is cosmetic by design -- the server validates the
+     reason against an enum and it can never move a leaderboard row. */
+  function event(type, reason) {
+    var body = { type: type };
+    if (reason) body.reason = reason;
+    call('POST', '/api/event', body);
+  }
+
+  // Resolves to the server's payload (rows + optional own row), or null.
+  function leaderboard(mode) {
+    return call('GET', '/api/leaderboard?mode=' + encodeURIComponent(mode), null);
+  }
+
+  /* V3.5. Public read-only profile. Resolves to the payload, or null. */
+  function player(twitchId) {
+    if (!twitchId) return Promise.resolve(null);
+    return call('GET', '/api/player/' + encodeURIComponent(twitchId), null);
+  }
+
+  /* V3.5. The public SSE feed.
+     EventSource reconnects on its own, which is exactly the wrong behaviour
+     against a backend that is simply gone -- it would retry every few seconds
+     forever. So the reconnects are counted: a stream that never opens is given
+     FEED_TRIES attempts and then closed for good, and the panel settles into
+     its quiet offline state. A stream that DID open resets the budget, because
+     that is an ordinary connection drop rather than a missing backend.
+
+     onLine(payload) gets each event, onState(state) gets one of
+     'connecting' | 'live' | 'offline'. Returns a closer. */
+  var FEED_TRIES = 4;
+  var FEED_HEALTHY_MS = 60000;   // a stream must last this long to earn a fresh budget
+  var FEED_KINDS = ['run_started', 'run_won', 'run_failed', 'flappy_death'];
+
+  function openFeed(onLine, onState) {
+    var ES = W.EventSource;
+    if (!CONFIGURED || !ES) { onState('offline'); return function () { }; }
+
+    var es = null, tries = 0, dead = false, opened = false, openedAt = 0;
+
+    function state(s) { try { onState(s); } catch (e) { } }
+
+    function connect() {
+      if (dead) return;
+      state('connecting');
+      try { es = new ES(API_BASE + '/api/feed'); } catch (e) { stop(); state('offline'); return; }
+
+      es.onopen = function () { opened = true; openedAt = Date.now(); state('live'); };
+
+      es.onerror = function () {
+        /* EventSource retries by itself, so the only job here is deciding when
+           to stop letting it. Closing the handle first makes that decision ours
+           rather than the browser's. */
+        try { es.close(); } catch (e) { }
+        if (dead) return;
+        /* Resetting the budget on every open only bounded a stream that NEVER
+           opened: one that opens and immediately EOFs reconnected forever
+           (measured at 43 times in 123 s). The budget is forgiven only by a
+           stream that actually stayed up for a while. */
+        if (opened && openedAt && (Date.now() - openedAt) >= FEED_HEALTHY_MS) tries = 0;
+        tries++;
+        if (tries >= FEED_TRIES) { stop(); state('offline'); return; }
+        state('connecting');
+        DELAY(connect, 3000 * tries);      // back off rather than hammer
+      };
+
+      // named events, with a generic fallback for a server that sends none
+      for (var i = 0; i < FEED_KINDS.length; i++) bind(FEED_KINDS[i]);
+      es.onmessage = function (ev) { deliver(null, ev); };
+
+      function bind(kind) {
+        es.addEventListener(kind, function (ev) { deliver(kind, ev); });
+      }
+    }
+
+    function deliver(kind, ev) {
+      var data;
+      try { data = JSON.parse(ev.data); } catch (e) { return; }   // keep-alives, junk
+      if (!data || typeof data !== 'object') return;
+      var type = kind || data.type;
+      if (FEED_KINDS.indexOf(type) < 0) return;
+      try { onLine(type, data); } catch (e) { }
+    }
+
+    function stop() {
+      dead = true;
+      if (es) { try { es.close(); } catch (e) { } es = null; }
+    }
+
+    connect();
+    return stop;
+  }
+
+  function configured() {
+    return CONFIGURED;
+  }
+
+  W.AimlabNet = Object.freeze({
+    configured: configured,
+    loginUrl: loginUrl,
+    me: me,
+    logout: logout,
+    startRun: startRun,
+    beat: beat,
+    event: event,
+    submitScore: submitScore,
+    leaderboard: leaderboard,
+    player: player,
+    openFeed: openFeed
+  });
+})();

@@ -123,7 +123,7 @@
   var BAR_H    = 36;   // title bar height
 
   var MARKUP = [
-    '<div class="hud" data-el="hud">',
+    '<div class="hud" data-el="hud" translate="no">',
     '<div class="row mode"><span class="v" data-el="mode">PRACTICE</span></div>',
     '<div class="row time"><span class="k">TIME</span><span class="v" data-el="time">00:00.000</span></div>',
     '<div class="row shot hide" data-el="shotRow"><span class="k">TIME LEFT</span><span class="v" data-el="shotClock">60</span></div>',
@@ -159,8 +159,12 @@
     '<div><dt>Near</dt><dd data-el="ovNear">0</dd></div>',
     '<div><dt>Best</dt><dd data-el="ovBest">--</dd></div>',
     '</dl>',
+    '<p class="ovnet hide" data-el="ovNet"></p>',
+    '<button class="again hide" data-el="ovBoard" type="button">View leaderboard</button>',
     '<p class="ovsig">SIG <span class="v" data-el="ovSig">--------</span></p>',
     '<p class="ovsus hide" data-el="ovSusRow">Sus events logged: <span data-el="ovSus">0</span></p>',
+    '<ul class="ovsuslist hide" data-el="ovSusList"></ul>',
+    '<p class="ovsusnote hide" data-el="ovSusNote">Score not submitted to the leaderboard.</p>',
     '<button class="again" data-el="again" type="button">Play again</button>',
     '</div>',
     '<div class="ovbody hide" data-el="ovCheat">',
@@ -233,8 +237,7 @@
 
     /* ---------------- tuning ---------------- */
     /* V2.2 retune: values marked (v1 N) were raised to make the chase harder.
-       Everything unmarked is the v1 value, unchanged. Measurements for the new
-       set are in the shell-integrator blackboard. */
+       Everything unmarked is the v1 value, unchanged. */
     var FLEE_RADIUS        = 470;    // px, cursor -> nearest point of the card rect     (v1 300)
     var FLEE_ACCEL         = 12500;   // px/s^2 at d = 0, scaled by (1 - d/R)^2
     var DODGE_GAIN         = 5.4;    // perpendicular px/s^2 per px/s of cursor approach (v1 2.2)
@@ -364,7 +367,18 @@
     ];
 
     /* V2.6 anti-cheat */
-    var CLOCK_TOLERANCE_MS = 750;  // total allowed drift between the two clocks
+    var CLOCK_TOLERANCE_MS = 750;  // allowed disagreement between the TWO WALL references
+    /* F3. A wall-clock discontinuity used to VOID the run: closing a laptop lid,
+       an NTP correction or a VM resume all freeze performance.now() while
+       Date.now() keeps counting, which read as a splice and cost the player
+       their time entirely. Those are absorbed as pauses now. What still cannot
+       be explained innocently is (a) too many of them, and (b) performance.now()
+       drifting away from the rAF timestamp -- the two are the same browser clock,
+       so a suspend moves them together and only a shim separates them. Since the
+       reported time IS performance.now-based, that is exactly the cheat. */
+    var CLOCK_DRIFT_MAX    = 5000; // slow divergence between monotonic and wall
+    var CLOCK_REBASE_MAX   = 6;    // absorbed discontinuities before it is a stepper
+    var CLOCK_RAF_TOL      = 3000; // performance.now() against the frame timestamp
     var CLOCK_AUDIO_TOL    = 1500; // the audio-thread cross-check, deliberately loose
     var CLOCK_STEP_MS      = 400;  // a single-frame jump between them reads as a splice
     var TAMPER_DEBOUNCE_MS = 800;  // one taunt per burst of meddling, not one per mutation
@@ -384,6 +398,8 @@
     var LAG_HEAL_MS   = 40;    // a frame at 25 fps or better is a healthy frame...
     var LAG_HEAL_STEP = 8;     // ...and pays down 8 ms of debt, so hitches never add up
     var LOOP_DEAD_MS  = 1000;  // main loop silent this long, while visible, = restart it
+    var LOOP_STALL_GRACE = 2;  // F10: a browser that hiccups once is not an attacker
+    var LOOP_STALL_MAX   = 3;  // F10: and it can never be more than this per run
 
     /* V2.7 layer B -- cursor presence gate on the winning press. */
     var PRESENCE_MS   = 350;   // a trusted move must be this recent...
@@ -395,8 +411,18 @@
     var ATTEST_FRAMES = 30;    // roughly twice a second
     var GEOM_SUS_DEBOUNCE_MS = 2000;  // one geometry complaint per this window...
     var GEOM_SUS_MAX         = 5;     // ...and this many in a whole run
+    var PRESENCE_SUS_MAX     = 3;     // F11: presence points per run
     var GEOM_TOL      = 2;     // px, box sizes and the button's offset in the frame
-    var POS_TOL       = 1;     // px, on-screen transform against the engine's own position
+    /* F2. The position check used to derive the card's centre from the MEASURED
+       box (cr.top + cr.height/2) and compare it against `y` at 1px. On a display
+       at 125% or 175% the Win95 chrome snaps to device pixels and the card lays
+       out ~1.6px short -- inside GEOM_TOL, so calibrate() refuses to adopt it,
+       yet enough to fail the centre test forever. Fractional scaling is the
+       Windows default on most laptops, so that was a clean run flagged 4-5x.
+       The check now compares the card's rendered ORIGIN against the exact
+       integers render() wrote, which is what "did the picture move" actually
+       means and never touches a measured height. */
+    var DRAW_TOL      = 2;     // px, on-screen origin against the transform we wrote
     var EXP_BTN_W     = 28;    // the caption button, straight out of the stylesheet
     var EXP_BTN_H     = 26;
     var BAR_PAD_R     = 4;     // .bar padding-right, which sets the button's inset
@@ -428,6 +454,34 @@
     var TAUNT_CAMP     = 'Camping is not aiming. Go and get it.';
     var CHEAT_TEXT_CLOCK = 'Two clocks, two answers. One of them is lying, and it is not ours.';
     var CHEAT_TEXT_STATE = 'Three copies of that number disagree. Ours are the two that match.';
+
+    /* V3.4 block 4b. Every soft detection the engine can raise, in the words the
+       player sees on the dialog. Saying "sus events: 3" and nothing else reads
+       as an accusation with no evidence; naming the checks is fairer and, since
+       these are the same checks a tamperer is poking at, it costs us nothing. */
+    var SUS_REASON_MAX = 8;
+    var SUS_WORDS = {
+      'build':              'SUS: build attestation failed',
+      'gauntlet':           'SUS: flagged during the bird gauntlet',
+      'geometry-boot':      'SUS: geometry attestation failed at startup',
+      'geometry-hidden':    'SUS: target visibility altered',
+      'geometry-button':    'SUS: target size altered',
+      'geometry-window':    'SUS: window size altered',
+      'geometry-offset':    'SUS: target position altered',
+      'geometry-transform': 'SUS: display transform detected',
+      'structure':          'SUS: window structure altered',
+      'geometry-button-children': 'SUS: foreign node inside the target',
+      'hud-edit':           'SUS: scoreboard numbers rewritten',
+      'presence':           'SUS: click with no pointer behind it',
+      'teleport':           'SUS: pointer teleport detected',
+      'stall':              'SUS: engine stall detected',
+      'lag-debt':           'SUS: frame lag debt exceeded',
+      'loop-stall':         'SUS: render loop stalled'
+    };
+
+    function susWords(reason) {
+      return SUS_WORDS[reason] || ('SUS: ' + String(reason));
+    }
 
     /* ---------------- listener bookkeeping ---------------- */
     var listeners = [];
@@ -481,6 +535,8 @@
     var elOvSig   = el('ovSig');
     var rowOvSus  = el('ovSusRow');
     var elOvSus   = el('ovSus');
+    var elOvSusList = el('ovSusList');
+    var elOvSusNote = el('ovSusNote');
     var cheatText = el('cheatText');
     var pauseBox  = el('pauseBox');
     var capBox    = el('capBox');
@@ -505,6 +561,8 @@
     var elOvNear  = el('ovNear');
     var elOvBest  = el('ovBest');
     var elOvNote  = el('ovNote');
+    var elOvNet   = el('ovNet');
+    var elOvBoard = el('ovBoard');
     var ovStats   = elOvMiss ? elOvMiss.parentNode.parentNode : null;
 
     // The window is built around the image at its native size, so it can be
@@ -610,6 +668,7 @@
     var shStartT = newShadow('origin', 0);
     var stateBad = false, cheatLogged = false;
 
+    var lastIsBest = false, lastCheated = false, lastKind = '';
     var lastT = 0, rafId = 0, tauntTimer = 0, winTimer = 0;
     var stopped = false;
 
@@ -617,6 +676,7 @@
     // coordinated edit of the first two (B4)
     var startWall = 0, clkDrift = 0, clkLast = null, clkStep = false;
     var clkSum = 0, clkPair = -1, clkStill = 0;
+    var clkRebases = 0, rafSkew0 = null;
     var startWall2 = 0;
     var audioT0 = -1, audioWall0 = 0, audioBad = 0;
     var tamperAt = -1e9, shame = 1;
@@ -625,6 +685,12 @@
     // layer D backoff: a page zoom or a user stylesheet is a mismatch restoreChrome
     // cannot undo, and re-running the repair every frame was a 123/s console flood
     var geomFailStreak = 0, geomSusAt = -1e9, geomSusCount = 0, restoreQuietUntil = 0;
+    var loopStalls = 0, loopSusAt = -1e9, loopSusCount = 0;
+    var rootW0 = 0, rootH0 = 0;      // F7: the frame of reference outside the card
+    /* F2. What render() last wrote, and where the card actually sits relative to
+       that (a constant, measured once at calibration). Attesting against these
+       tests the picture the engine drew rather than a re-derived centre. */
+    var drawnX = 0, drawnY = 0, drawOffX = 0, drawOffY = 0;
 
     // ruling 3: too small a viewport pauses the run behind a dialog
     var paused = false, pauseAt = 0, pauseWall = 0, pauseWall2 = 0;
@@ -653,12 +719,14 @@
 
     // V2.7 layer B: the last trusted mouse position, and the press that failed the gate
     var moveT = -1e9, moveX = 0, moveY = 0, presenceBlockAt = -1e9;
+    var presenceSus = 0;
 
     // V2.7 layer D: how many frames until the next attestation
     var attestIn = ATTEST_FRAMES;
 
     // V2.7 layer H: soft detections, seeded with anything flappy already saw
     var susN = (opts.susSeed > 0) ? Math.floor(opts.susSeed) : 0;
+    var susSeeded = susN > 0;
 
     // V2.7 layer G: the win signature, once it has been computed
     var winSig = '';
@@ -753,8 +821,16 @@
 
     /* ---- the sus meter (V2.7 layer H) ----
        Every soft detection ends here. It counts and it shows; it never locks. */
+    /* V3.4 block 4b: the player is told WHAT tripped, not just how many times.
+       Reasons are kept distinct and in the order they first fired, so a single
+       misbehaving check cannot flood the dialog with the same line. */
+    var susReasons = [];
+
     function sus(reason) {
       susN++;
+      if (susReasons.length < SUS_REASON_MAX && susReasons.indexOf(reason) < 0) {
+        susReasons.push(reason);
+      }
       renderSus();
       LOG('[AIMLAB] SUS n=' + susN + ' reason=' + reason);
     }
@@ -862,29 +938,68 @@
 
     // Every detection ends here: a taunt, a noise and a sus point, never a lock.
     function onTamper(text, reason) {
+      if (!nuisance(text)) return;
+      sus(reason);
+    }
+
+    /* F4/F5. The same taunt and the same noise, with no sus point. Some things
+       are worth answering without being worth an accusation: a right-click (a
+       Mac trackpad two-finger tap IS one, with no touch event to exempt it) and
+       a devtools shortcut are both ordinary player behaviour, and under the V3.4b
+       absolute gate one stray keypress silently cost a real player their score.
+       The deterrent was always the taunt. Anyone actually tampering trips
+       geometry, structure or state the moment they change anything, which is
+       where the detection genuinely lives. Returns false when debounced. */
+    function nuisance(text) {
       var t = NOW();
-      if (t - tamperAt < TAMPER_DEBOUNCE_MS) return;
+      if (t - tamperAt < TAMPER_DEBOUNCE_MS) return false;
       tamperAt = t;
       showTaunt(text);
       playError();
-      sus(reason);
+      return true;
     }
 
     // Two independent clocks and a rolling checksum over the pair. Backgrounding
     // a tab moves both together, so only a doctored clock separates them.
-    function clockTick() {
+    function clockTick(rafT) {
       if (!started || won) return;
       var p = NOW() - shStartT.get();
       var w = WALL() - startWall;
       var d = p - w;
-      var ad = d < 0 ? -d : d;
-      if (ad > clkDrift) clkDrift = ad;
+
+      /* F3. A step means the wall clock and the monotonic clock parted company
+         in one frame. The player cannot cause that by playing, and a suspend
+         causes it every time, so absorb it the way leavePause() absorbs a pause:
+         rebase every wall reference onto the monotonic clock and carry on. The
+         run keeps the time the player actually played. Only an implausible
+         NUMBER of these reads as someone stepping the clock repeatedly. */
       if (clkLast !== null) {
         var jump = d - clkLast;
         if (jump < 0) jump = -jump;
-        if (jump > CLOCK_STEP_MS) clkStep = true;   // a splice steps, honest drift crawls
+        if (jump > CLOCK_STEP_MS) {
+          startWall += (w - p);          // d becomes 0
+          startWall2 = wall2() - p;
+          audioT0 = -1;
+          audioBad = 0;
+          if (++clkRebases > CLOCK_REBASE_MAX) clkStep = true;
+          w = WALL() - startWall;
+          d = p - w;
+        }
       }
+      var ad = d < 0 ? -d : d;
+      if (ad > clkDrift) clkDrift = ad;
       clkLast = d;
+
+      /* The frame timestamp and performance.now() are the same browser clock, so
+         their difference is a constant that a suspend cannot move -- both freeze
+         and both resume together. A pre-parse shim of performance.now() moves it
+         immediately, and since the reported time is derived from performance.now()
+         that shim is the only way to actually shorten a run. */
+      if (typeof rafT === 'number' && isFinite(rafT)) {
+        var skew = NOW() - rafT;
+        if (rafSkew0 === null) rafSkew0 = skew;
+        else if (Math.abs(skew - rafSkew0) > CLOCK_RAF_TOL) clkStep = true;
+      }
 
       // The pair is hashed per frame and rolled into a running checksum. Drift
       // catches one clock being slowed; this catches both being pinned, which
@@ -925,37 +1040,45 @@
     }
 
     function clockIsSuspect() {
-      return clkStep || clkDrift > CLOCK_TOLERANCE_MS;
+      return clkStep || clkDrift > CLOCK_DRIFT_MAX;
     }
 
     // The HUD and the overlay are projections. If anything edits them, re-derive
     // from closure state; our own writes are already equal, so this never loops.
+    /* F8. Every repair used to be an accusation, so Chrome's own translate
+       feature, reader modes and grammar extensions -- all of which rewrite text
+       nodes -- charged a sus point for rewording a static label. Only the NUMBERS
+       are worth defending: they are what a cheat would edit, and a label carries
+       no state. Labels are still repaired, silently. */
     function reproject() {
-      var fixed = 0;
+      var values = 0;
       var m = shMisses.get(), nm = shNear.get();
-      fixed += reassert(elMode, MODE_LABEL);
-      fixed += reassert(elMiss, m);
-      fixed += reassert(elNear, nm);
-      if (susN > 0) fixed += reassert(elSus, susN);
-      if (bestMs !== null) fixed += reassert(elBest, fmt(bestMs));
+      reassert(elMode, MODE_LABEL);                 // a label: repair, never accuse
+      values += reassert(elMiss, m);
+      values += reassert(elNear, nm);
+      if (susN > 0) values += reassert(elSus, susN);
+      if (bestMs !== null) values += reassert(elBest, fmt(bestMs));
       if (won) {
-        fixed += reassert(elTime, fmt(finalMs));
-        fixed += reassert(elOvTime, fmt(finalMs));
-        fixed += reassert(elOvMiss, m);
-        fixed += reassert(elOvNear, nm);
-        fixed += reassert(elOvBest, bestMs === null ? '--' : fmt(bestMs));
-        if (winSig) fixed += reassert(elOvSig, winSig.slice(0, 8));
-        if (susN > 0) fixed += reassert(elOvSus, susN);
+        values += reassert(elTime, fmt(finalMs));
+        values += reassert(elOvTime, fmt(finalMs));
+        values += reassert(elOvMiss, m);
+        values += reassert(elOvNear, nm);
+        values += reassert(elOvBest, bestMs === null ? '--' : fmt(bestMs));
+        if (winSig) values += reassert(elOvSig, winSig.slice(0, 8));
+        if (susN > 0) values += reassert(elOvSus, susN);
       }
-      if (fixed > 0) onTamper(TAUNT_TAMPER, 'hud-edit');
+      if (values > 0) onTamper(TAUNT_TAMPER, 'hud-edit');
     }
 
     function reassert(node, v) {
       if (!node) return 0;
       var s = String(v);
-      if (node.textContent === s) return 0;
+      var cur = node.textContent;
+      if (cur === s) return 0;
       node.textContent = s;
-      return 1;
+      // F8: a node whose text only gained or lost surrounding whitespace still
+      // says the same thing. Repair it, but do not call it an edit.
+      return (cur !== null && String(cur).replace(/\s+/g, ' ').trim() === s) ? 0 : 1;
     }
 
     function watchDom() {
@@ -1010,6 +1133,7 @@
           sus('geometry-boot');
           showTaunt(TAUNT_GEOM);
           restoreChrome();
+          syncDrawOffset();
           return;
         }
         cardW = cr.width;
@@ -1020,8 +1144,62 @@
         btnOffY = (br.top + br.height / 2) - (cr.top + cr.height / 2);
         wrap.style.width = cardW + 'px';
         clampIntoView();
-        render();
       }
+      syncDrawOffset();
+    }
+
+    /* F2. Where the card's border box lands relative to the transform we wrote.
+       On a fractional display scale this is a fraction of a pixel rather than
+       zero, and it is CONSTANT -- so measuring it once here means attest() can
+       compare an absolute on-screen position without ever inheriting the layout
+       rounding as an error. Anything that later moves the card really has moved
+       it, which is the only thing this check was ever meant to catch. */
+    function syncDrawOffset() {
+      render();
+      var c2 = boxOf(card);
+      if (!(c2.width > 0 && c2.height > 0)) return;
+      drawOffX = c2.left - drawnX;
+      drawOffY = c2.top - drawnY;
+      var rr = boxOf(root);
+      if (rr.width > 0 && rr.height > 0) { rootW0 = rr.width; rootH0 = rr.height; }
+    }
+
+    /* F7. Page zoom, a user stylesheet and accessibility extensions all scale
+       the whole interface, and every one of them used to read as an inflated
+       hitbox. The tell is WHERE the scale stops: the playfield root is outside
+       the card, so an attacker inflating the button or the window leaves it
+       alone, while an environment scaling the page moves it by exactly the same
+       factor. When every ratio agrees, adopt the new geometry and say nothing --
+       a uniformly scaled game is no easier, because the precision it demands
+       scales with it. Returns true when the mismatch was environmental. */
+    function adoptUniformScale(cr, br) {
+      if (!(rootW0 > 0 && rootH0 > 0)) return false;
+      var rr = boxOf(root);
+      if (!(rr.width > 0 && rr.height > 0)) return false;
+
+      var k = rr.width / rootW0;
+      // an unmoved root means whatever changed is inside the card: that is an attack
+      if (Math.abs(k - 1) < 0.01) return false;
+      if (!(k > 0.2 && k < 5)) return false;
+
+      var ratios = [rr.height / rootH0,
+                    cr.width / cardW, cr.height / cardH,
+                    br.width / btnW, br.height / btnH];
+      for (var i = 0; i < ratios.length; i++) {
+        if (Math.abs(ratios[i] - k) > k * 0.04) return false;   // all of it, or none
+      }
+
+      cardW = cr.width;
+      cardH = cr.height;
+      btnW = br.width;
+      btnH = br.height;
+      btnOffX = (br.left + br.width / 2) - (cr.left + cr.width / 2);
+      btnOffY = (br.top + br.height / 2) - (cr.top + cr.height / 2);
+      wrap.style.width = cardW + 'px';
+      clampIntoView();
+      syncDrawOffset();
+      geomFailStreak = 0;
+      return true;
     }
 
     function attest() {
@@ -1052,14 +1230,20 @@
         var oy = (br.top + br.height / 2) - (cr.top + cr.height / 2);
         if (Math.abs(ox - btnOffX) > GEOM_TOL || Math.abs(oy - btnOffY) > GEOM_TOL) {
           bad = 'offset';
-        } else if (Math.abs((cr.left + cr.width / 2) - x) > POS_TOL ||
-                   Math.abs((cr.top + cr.height / 2) - y) > POS_TOL) {
-          // what is on screen against what the engine believes it drew
+        } else if (Math.abs(cr.left - (drawnX + drawOffX)) > DRAW_TOL ||
+                   Math.abs(cr.top - (drawnY + drawOffY)) > DRAW_TOL) {
+          // where the card actually landed against the transform we just wrote
           bad = 'transform';
         }
       }
 
       if (!bad) { geomFailStreak = 0; return; }
+
+      /* F7: a mismatch in the SIZES may just be the page being zoomed. The
+         position check ('transform') is deliberately not routed through here --
+         a moved card is a moved card at any scale. */
+      if ((bad === 'button' || bad === 'window' || bad === 'offset') &&
+          adoptUniformScale(cr, br)) return;
 
       /* Not every mismatch is repairable. A page-level `zoom` or a
          `transform: scale()` from a user stylesheet or an accessibility
@@ -1345,6 +1529,14 @@
           : 'That is not where the piece goes.');
       banBox.classList.remove('hide');
       LOG('[AIMLAB] BANNED reason=' + reason);
+
+      /* V3.5. Tell the shell how this ended, so the run history and the public
+         feed can name the reason. Cosmetic only -- it cannot affect a score --
+         and, like every other opts callback, a throw here must not derail the
+         ban screen. */
+      if (typeof opts.onBan === 'function') {
+        try { opts.onBan(reason); } catch (e) { /* never blocks the overlay */ }
+      }
     }
 
     function banExit(action) {
@@ -1617,7 +1809,7 @@
         startWall += WALL() - pauseWall;
         startWall2 += wall2() - pauseWall2;
       }
-      clkLast = null; clkPair = -1; clkStill = 0;
+      clkLast = null; clkPair = -1; clkStill = 0; rafSkew0 = null;
       audioT0 = -1; audioBad = 0;
       accumMs = 0;
       simT = NOW();
@@ -1633,8 +1825,9 @@
       // Integer pixels, or the two-step bevel subpixel-blurs into a soft
       // approximation of Win95 chrome. x/y stay float in the physics; only the
       // paint is rounded, which is at most 0.5px per axis and well inside POS_TOL.
-      wrap.style.transform =
-        'translate3d(' + Math.round(x - cardW / 2) + 'px,' + Math.round(y - cardH / 2) + 'px,0)';
+      drawnX = Math.round(x - cardW / 2);
+      drawnY = Math.round(y - cardH / 2);
+      wrap.style.transform = 'translate3d(' + drawnX + 'px,' + drawnY + 'px,0)';
       if (tauntOn) placeTaunt();
     }
 
@@ -1760,7 +1953,11 @@
         if (e.button === 0) presenceBlockAt = NOW();   // only a primary press makes a click
         addMiss(refused);
         // camping is bad play, not tampering, so it costs a miss but never a sus point
-        if (refused !== 'camping') sus(refused);
+        /* F11. Capped: presence was the only sus path with no rate limit, and
+           one misbehaving environment could post hundreds of points. Past the
+           cap the press is still refused and still taunted -- only the counter
+           stops, which is all the gate needs from it. */
+        if (refused !== 'camping' && ++presenceSus <= PRESENCE_SUS_MAX) sus(refused);
         showTaunt(refused === 'camping' ? TAUNT_CAMP : TAUNT_PRESENCE);
         return;                    // no latch either: the window keeps running
       }
@@ -1805,7 +2002,13 @@
        cursor and waiting for the window to arrive under it is not. The active
        350 ms / 150 px branch is unchanged. */
     function presenceBlock(cx, cy) {
-      if (moveT <= -1e8) return 'presence';     // no trusted mouse movement at all yet
+      /* F9. "No trusted move yet" is the same evidential situation as camping --
+         a pointer that has not moved -- and camping is already correctly graded
+         as bad play rather than tampering. It happens to real players: the
+         cursor sits where the mode button was, the window drifts under it, and
+         they click. In simulation it also happens on the first press after a
+         captcha closes, because moveT updates are dropped while shielded. */
+      if (moveT <= -1e8) return 'camping';
       var dx = cx - moveX, dy = cy - moveY;
       var dist = Math.sqrt(dx * dx + dy * dy);
       var age = NOW() - moveT;
@@ -1831,19 +2034,20 @@
     on(window, 'keydown', function (e) {
       if (won || !isToolsKey(e)) return;
       e.preventDefault();
-      onTamper(TAUNT_TOOLS, 'devtools-key');
-      enterShame();
+      nuisance(TAUNT_TOOLS);
+      enterShame();            // the run gets harder; the score stays earnable
     }, true);
 
-    /* A long-press on a touchscreen fires contextmenu, so accusing every
-       contextmenu told a phone player resting a finger on the playfield that
-       they were poking at devtools. Suppress the menu for everyone; only count
-       it against a session that has never produced a touch. */
+    /* Suppress the menu for everyone and taunt the mouse users. The old
+       sawTouch exemption existed because a long-press on a touchscreen fires
+       contextmenu -- but a Mac trackpad two-finger tap fires one with no touch
+       event at all, so the exemption never covered the commonest case. It is
+       moot now: this costs no sus point either way (F4). */
     on(root, 'contextmenu', function (e) {
       if (won) return;
       e.preventDefault();
       if (sawTouch) return;
-      onTamper(TAUNT_TOOLS, 'contextmenu');
+      nuisance(TAUNT_TOOLS);
     });
 
     on(window, 'click', function (e) {
@@ -2341,7 +2545,7 @@
 
       integrate(dtMs, t);
       render();
-      clockTick();
+      clockTick(t);
 
       if (lagDebtMs > LAG_DEBT_MAX && !lagFlagged) {
         lagFlagged = true;
@@ -2387,7 +2591,19 @@
       lastT = NOW();
       accumMs = 0;
       simT = lastT;
-      sus('loop-stall');
+      /* F10. This was the one reason with no debounce and no per-run cap, and
+         it trusts document.hidden to be truthful. Any environment where rAF
+         stops while visibility stays "visible" -- some Linux WMs, RDP/VNC, an
+         occluded window -- fired it about once a second forever. Restart the
+         loop every time; charge for it rarely. */
+      if (++loopStalls >= LOOP_STALL_GRACE) {
+        var lt = NOW();
+        if (lt - loopSusAt >= GEOM_SUS_DEBOUNCE_MS && loopSusCount < LOOP_STALL_MAX) {
+          loopSusAt = lt;
+          loopSusCount++;
+          sus('loop-stall');
+        }
+      }
       showTaunt(TAUNT_LAG);
       rafId = RAF(frame);
     }
@@ -2457,6 +2673,8 @@
       var kind = (stateBad || opts.stateCheat === true) ? 'state'
                : (clockIsSuspect() ? 'clock' : '');
       var cheated = !!kind;
+      lastKind = kind;
+      lastCheated = cheated;
 
       if (cheated) {
         logCheat(kind);
@@ -2475,6 +2693,7 @@
               ' near_misses=' + nm +
               ' sus=' + susN +
               ' sig=' + sig);
+          emitWin(sig);
         });
       }
 
@@ -2491,6 +2710,7 @@
           writeBest(finalMs);
         }
       }
+      lastIsBest = isBest;
       showBest();
 
       setText(elOvTime, fmt(finalMs));
@@ -2503,6 +2723,21 @@
       if (susN > 0) {
         setText(elOvSus, susN);
         rowOvSus.classList.remove('hide');
+
+        /* V3.4 block 4b: name the checks that tripped, and say plainly that the
+           run is not going to the board. The shell enforces that separately --
+           this is the player-facing half of the same rule. */
+        if (susSeeded && susReasons.indexOf('gauntlet') < 0) susReasons.unshift('gauntlet');
+        if (elOvSusList) {
+          while (elOvSusList.firstChild) elOvSusList.removeChild(elOvSusList.firstChild);
+          for (var si = 0; si < susReasons.length; si++) {
+            var li = document.createElement('li');
+            li.textContent = susWords(susReasons[si]);
+            elOvSusList.appendChild(li);
+          }
+          if (susReasons.length) elOvSusList.classList.remove('hide');
+        }
+        if (elOvSusNote) elOvSusNote.classList.remove('hide');
       }
 
       if (cheated) {
@@ -2518,21 +2753,56 @@
         if (focusTarget && focusTarget.focus) focusTarget.focus();
       }, 300);
 
-      if (typeof opts.onWin === 'function') {
-        try {
-          opts.onWin({
-            timeMs: finalMs,
-            misses: m,
-            nearMisses: nm,
-            bestMs: bestMs,
-            isBest: isBest,
-            cheated: cheated,
-            cheatKind: kind,
-            sus: susN,
-            clockSum: clkSum,
-            stateSum: shChain
-          });
-        } catch (e) { /* a caller's handler must not break the engine */ }
+      /* V3.3 wants the signed WIN line in the score POST, and layer G signs
+         asynchronously -- so the callback now fires from inside that callback
+         rather than ahead of it. The digest of a 40-character string resolves
+         well inside the 300 ms overlay delay, and the cheated path has no
+         signature to wait for. */
+      emitWin(cheated ? '' : null);
+    }
+
+    var winEmitted = false;
+    function emitWin(sig) {
+      if (winEmitted) return;
+      if (sig === null) return;              // still waiting on the digest
+      winEmitted = true;
+      if (typeof opts.onWin !== 'function') return;
+      try {
+        opts.onWin({
+          timeMs: finalMs,
+          misses: shMisses.get(),
+          nearMisses: shNear.get(),
+          bestMs: bestMs,
+          isBest: lastIsBest,
+          cheated: lastCheated,
+          cheatKind: lastKind,
+          sus: susN,
+      susReasons: susReasons.slice(),
+          sig: sig,
+          clockSum: clkSum,
+          stateSum: shChain
+        });
+      } catch (e) { /* a caller's handler must not break the engine */ }
+    }
+
+    /* V3 touchpoint. main.js owns the backend; the engine only lends it two
+       slots on the win dialog -- a line of text and a button -- and never learns
+       what a leaderboard is. Safe to call late: the score POST resolves after
+       the dialog is already up. */
+    var boardFn = null;
+    on(elOvBoard, 'click', function (e) {
+      if (e.isTrusted && typeof boardFn === 'function') boardFn();
+    });
+
+    function winExtras(o) {
+      if (stopped || !won || !o) return;
+      if (typeof o.note === 'string' && o.note) {
+        setText(elOvNet, o.note);
+        elOvNet.classList.remove('hide');
+      }
+      if (typeof o.onBoard === 'function') {
+        boardFn = o.onBoard;
+        elOvBoard.classList.remove('hide');
       }
     }
 
@@ -2602,7 +2872,7 @@
     rafId = RAF(frame);
     watchdog = EVERY(heartbeat, 500);
 
-    return Object.freeze({ stop: stop, setAudio: setAudio });
+    return Object.freeze({ stop: stop, setAudio: setAudio, winExtras: winExtras });
   }
 
   // Frozen so the module cannot be edited from the console, and defined as a

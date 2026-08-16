@@ -36,6 +36,26 @@ The close button only responds to a real mouse click that arrives where
 the pointer actually is, and the game keeps a running tally of anything
 that looks like tampering. None of it locks you out; it just says so.
 
+## Leaderboard
+
+Sign in with Twitch on the start screen to post your times. The LEADERBOARD tab
+shows the top 50 for each mode, with each player's click count and three failure
+tallies: total, deaths in the gauntlet, and windows that got away. Anyone can
+read it, signed in or not. Play without signing in and everything works exactly
+the same; your time just does not get posted.
+
+The GAME tab carries an activity log that streams runs as they happen -- who
+started, who won, and where the ones that failed went wrong. Clicking any name,
+in the log or on the leaderboard, opens that player's record: best time per mode,
+failure counts, and their recent runs.
+
+Privacy: signing in stores only your Twitch id, display name and avatar URL --
+no email, no chat access, no permissions requested. Be aware that all three are
+public once you sign in: your name and avatar appear in the activity log and on
+the leaderboard, and your run history is readable by anyone. Scores and counters
+are kept server-side. Signing out is one click and the site keeps working
+without it.
+
 ## Run it locally
 
 Clone the repo and serve it over HTTP:
@@ -46,7 +66,9 @@ python3 -m http.server
 
 Then open http://localhost:8000/. Opening `index.html` straight off disk
 works for Practice, but browsers refuse the audio fetch on `file://`, so
-Simulation runs silent. No build step, no dependencies, no CDN calls.
+Simulation runs silent. The game itself has no build step, no dependencies
+and no CDN calls; a local copy simply shows the leaderboard as OFFLINE,
+since sign-in only works from the published site.
 
 ## Repo layout
 
@@ -55,9 +77,13 @@ Simulation runs silent. No build step, no dependencies, no CDN calls.
 - `js/flappy.js` - the Flappy-style gauntlet in Simulation mode.
 - `js/main.js` - wiring between the start screen and the game modes.
 - `js/sentinel.js` - build integrity check.
+- `js/net.js` - leaderboard and sign-in client.
 - `assets/emoney.png` - the Practice Mode target.
 - `assets/simulation.png` - the Simulation Mode target.
 - `assets/loop.wav` - the Simulation Mode audio loop.
+- `server/` - the leaderboard API: Twitch sign-in, score validation and
+  the activity feed. Node and Postgres, deployed separately. Its secrets
+  live in the host's environment, never in this repo.
 
 ---
 
