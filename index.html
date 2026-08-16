@@ -19,7 +19,7 @@
   "js/chase.js": "488175a488df63d2ac700466cc7cb99b76054314e6382b1b648b538b9fc86ea3",
   "js/flappy.js": "9892741923597a9310115f362c7fe7bf162a19cae94c05d77300b4d6176d69d6",
   "js/net.js": "227c2dc6d577cdd1ece8192a359c8f7ede66193796688e03dd3751fd70ea049b",
-  "js/main.js": "bd9608cfac688585a404dc9ec33e6cb9d20b0a3e8d8303a071ede70498f9e329"
+  "js/main.js": "25e888ef7489fb8d821b56abf66e9a2b9af72bf502ee0de8e6eef00bbce882b8"
 }
 </script>
 <style>
@@ -114,7 +114,12 @@
      loudly broke the period spell while it stayed macOS-slim. WebKit/Blink
      get the real thing -- dithered track, raised thumb, arrow buttons;
      Firefox at least gets the right colours. */
-  * { scrollbar-color: var(--w95-face) #dfdfdf; }
+  /* Firefox only: colours without the chrome. Setting scrollbar-color in a
+     Blink browser silently switches OFF every ::-webkit-scrollbar rule
+     below, so it must never reach one. */
+  @supports not selector(::-webkit-scrollbar) {
+    * { scrollbar-color: var(--w95-face) #dfdfdf; }
+  }
 
   ::-webkit-scrollbar { width: 16px; height: 16px; }
 
@@ -526,7 +531,9 @@
      their slot (visibility, not display) precisely so the tallest one still
      sizes the cell. */
   .panels { display: grid; }
-  .panels > .panel { grid-area: 1 / 1; }
+  /* min-width 0: a panel's inner track (the stats board's 440) must scroll
+     inside its sunken pane, never inflate the whole window past its border */
+  .panels > .panel { grid-area: 1 / 1; min-width: 0; }
   .panel.hide { visibility: hidden; }
 
   /* The two details-view panels stretch their white pane into whatever height
@@ -738,16 +745,19 @@
      drifted off their columns and let rows show through the sticky head.
      Only what a <button> genuinely needs reset is reset here. */
   .stname    { flex: 1 1 auto; min-width: 92px; text-align: left; }
-  .stnumcol  { flex: none; width: 58px; text-align: right; }
+  .stnumcol  { flex: none; width: 54px; text-align: right; }
   .sttimecol { flex: none; width: 66px; text-align: right; }
 
-  /* seven columns of the stats board's own widths; the board keeps its 428 */
+  /* seven columns of the stats board's own widths; the board keeps its 428.
+     440 sits inside the window body's 450, so the desktop pane carries no
+     sideways scrollbar -- phones scroll, same as the board. */
   #panelStats .lbhead,
-  #panelStats .lbbody { min-width: 456px; }
+  #panelStats .lbbody { min-width: 440px; }
 
   .stsort {
     appearance: none;
     -webkit-appearance: none;
+    position: relative;
     margin: 0;
     cursor: pointer;
   }
@@ -760,9 +770,17 @@
 
   .stsort:focus-visible { outline: 1px dotted #000; outline-offset: -3px; }
 
-  /* the sort marker rides the label's outward side (set in js), so the
-     label's column edge never moves when the arrow appears */
-  .stdir { font-size: 8px; }
+  /* the sort marker floats in the header's empty side, out of the layout
+     entirely, so the label's column edge never moves and nothing clips */
+  .stdir {
+    position: absolute;
+    left: 3px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 8px;
+  }
+
+  .stname .stdir { left: auto; right: 5px; }
 
   /* counts read in the UI face like the board's CLICKS/FAILS; times in mono
      like the board's TIME column */
@@ -2056,7 +2074,7 @@
             <button class="lbcol stsort stname" data-key="displayName" data-label="PLAYER" type="button">PLAYER</button>
             <button class="lbcol stsort stnumcol" data-key="wins" data-label="WINS" type="button">WINS</button>
             <button class="lbcol stsort stnumcol" data-key="flappyFails" data-label="BIRD" type="button">BIRD</button>
-            <button class="lbcol stsort stnumcol" data-key="chaseFails" data-label="POPUP" type="button">POPUP</button>
+            <button class="lbcol stsort stnumcol" data-key="chaseFails" data-label="CHASE" type="button">CHASE</button>
             <button class="lbcol stsort stnumcol" data-key="totalFails" data-label="FAILS" type="button">FAILS</button>
             <button class="lbcol stsort sttimecol" data-key="bestPracticeMs" data-label="PRAC" type="button">PRAC</button>
             <button class="lbcol stsort sttimecol" data-key="bestSimMs" data-label="SIM" type="button">SIM</button>

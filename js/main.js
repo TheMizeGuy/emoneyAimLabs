@@ -1037,13 +1037,11 @@
         dir.className = 'stdir';
         dir.textContent = statsSort.dir < 0 ? '▼' : '▲';
       }
-      // The arrow sits on the label's OUTWARD side -- before a right-aligned
-      // label, after the left-aligned PLAYER -- so the label's edge stays
-      // planted over its column whichever header carries the sort.
-      var leftAligned = b.classList.contains('stname');
-      if (dir && !leftAligned) { b.appendChild(dir); b.appendChild(document.createTextNode(' ')); }
+      // The arrow floats in the header's empty side (absolute, .stdir), so
+      // the label's edge stays planted over its column whichever header
+      // carries the sort and however narrow the column runs.
       b.appendChild(document.createTextNode(label));
-      if (dir && leftAligned) { b.appendChild(document.createTextNode(' ')); b.appendChild(dir); }
+      if (dir) b.appendChild(dir);
       b.setAttribute('aria-label',
         label + (on ? (statsSort.dir < 0 ? ', sorted descending' : ', sorted ascending') : ''));
     }
