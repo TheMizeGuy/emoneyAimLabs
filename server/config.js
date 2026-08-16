@@ -15,10 +15,9 @@ const MIN_SECRET_LENGTH = 32;
 const CONFIG_LIMITS = Object.freeze({
   PORT_MIN: 1,
   PORT_MAX: 65535,
-  // The engine's arming gate makes a win before 700 ms impossible. A clean
-  // browser run has completed at 1.839 s, so the old 2 s production minimum was
-  // already a false-positive boundary rather than a physical one.
-  CHASE_FLOOR_MIN_MS: 700,
+  // Keep the configurable server floor aligned with the engine's 400 ms arming
+  // gate. Higher production values are policy, not evidence of physical limits.
+  CHASE_FLOOR_MIN_MS: 400,
   SESSION_TTL_MIN_MS: 60000,
   SESSION_TTL_MAX_MS: 30 * 24 * 60 * 60 * 1000,
   STATE_TTL_MIN_MS: 60000,
