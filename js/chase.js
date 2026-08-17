@@ -2365,9 +2365,6 @@
        wall the server relies on -- the run and shot clocks charge throughout,
        and closing a window costs nothing but the trip. */
     var FOLDER_COUNT   = 10;
-    var FOLDER_MIN_GAP = 160;   // px between icon origins when seeding; must
-                                // exceed the box diagonal (158.6) or the
-                                // never-stack comment below stops being true
     var FW_W = 300, FW_H = 210; // the folder window, chrome included
     var FOLDER_NAMES = ['New Folder', 'New Folder (2)', 'New Folder (3)',
                         'My Documents', 'DO NOT OPEN', 'taxes 1997',
@@ -2402,7 +2399,7 @@
       [0, 0, 250, 190],
       [0, 500, 440, 620]
     ];
-    var FOLDER_BOX_W = 132, FOLDER_BOX_H = 88;  // the icon's own footprint
+    var FOLDER_BOX_W = 198, FOLDER_BOX_H = 120; // the icon's own footprint
 
     function inKeepout(fx, fy) {
       for (var k = 0; k < FOLDER_KEEPOUT.length; k++) {
@@ -2424,20 +2421,24 @@
         // band that no keep-out touches.
         var fx = 0, fy = 0, ok = false, tries = 0;
         while (!ok && tries++ < 80) {
-          fx = 24 + rnd() * (PLAYFIELD_W - 180);
-          fy = 16 + rnd() * (PLAYFIELD_H - 130);
+          fx = 24 + rnd() * (PLAYFIELD_W - 246);
+          fy = 16 + rnd() * (PLAYFIELD_H - 162);
           if (inKeepout(fx, fy)) continue;
           ok = true;
           if (tries <= 50) {
+            // Exact box separation, not an origin-distance circle: at this
+            // icon size a circle wide enough to guarantee no overlap starves
+            // the draw, and a narrower one lies about the guarantee.
             for (var j = 0; j < placed.length; j++) {
               var gx = fx - placed[j][0], gy = fy - placed[j][1];
-              if (gx * gx + gy * gy < FOLDER_MIN_GAP * FOLDER_MIN_GAP) { ok = false; break; }
+              if (gx > -FOLDER_BOX_W && gx < FOLDER_BOX_W
+                  && gy > -FOLDER_BOX_H && gy < FOLDER_BOX_H) { ok = false; break; }
             }
           }
         }
         if (!ok) {
-          fx = 300 + rnd() * (PLAYFIELD_W - 480);
-          fy = 210 + rnd() * 170;
+          fx = 300 + rnd() * (PLAYFIELD_W - 520);
+          fy = 210 + rnd() * 160;
         }
         placed.push([fx, fy]);
         var pick = Math.floor(rnd() * names.length) % names.length;
