@@ -3,7 +3,22 @@
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 
-const CHALLENGE_ROUNDS = 4;
+// V4.3: one round is the policy (owner ruling: the other three rounds were
+// pure annoyance). Honest arithmetic: four rounds put one blind attempt at
+// 1/256; one round puts it at 1/4, so a scripted guesser now expects ~3 failed
+// runs (~20 s of the 0/5/15/30/60 retry ramp, plus a gauntlet replay each) per
+// pass instead of ~256. The ramp and the one-shot run closure are the burst
+// fence now; the audit's AC-20 residual is re-graded in
+// docs/anti-cheat-audit.md's V4.3 amendment. Pre-V4.3 clients neither request
+// a count nor tolerate any other, so they are still served and graded at
+// CHALLENGE_ROUNDS_LEGACY until every cached copy ages out; the answer stream
+// is always derived at legacy length and graded as a prefix.
+//
+// Deploy order matters in one direction: the API must ship before the client,
+// or a V4.3 Practice client that sends no challenge_start at all is refused
+// challenge_required by a pre-V4.3 validator.
+const CHALLENGE_ROUNDS = 1;
+const CHALLENGE_ROUNDS_LEGACY = 4;
 const WIDTH = 260;
 const HEIGHT = 140;
 const PIECE = 46;
@@ -24,17 +39,26 @@ function keyedBytes(secret, message) {
 }
 
 function expectedAnswers({ runId, seed, secret }) {
-  return Array.from({ length: CHALLENGE_ROUNDS }, (_, round) => (
+  return Array.from({ length: CHALLENGE_ROUNDS_LEGACY }, (_, round) => (
     keyedBytes(secret, `challenge-answer\0${runId}\0${seed}\0${round}`)[0] & 3
   ));
 }
 
+// A submission is graded against the prefix of the answer stream it claims to
+// cover: one answer from a V4.3 client, four from a legacy one. Grading stays
+// one-shot either way -- a wrong batch closes the run -- so accepting the
+// shorter prefix grants exactly the 1-in-4 the new policy intends and nothing
+// beyond it.
 function matchesAnswers(candidate, key) {
-  if (!Array.isArray(candidate) || candidate.length !== CHALLENGE_ROUNDS) return false;
+  if (
+    !Array.isArray(candidate)
+    || candidate.length < 1
+    || candidate.length > CHALLENGE_ROUNDS_LEGACY
+  ) return false;
   if (!candidate.every((answer) => Number.isInteger(answer) && answer >= 0 && answer < 4)) {
     return false;
   }
-  const expected = Buffer.from(expectedAnswers(key));
+  const expected = Buffer.from(expectedAnswers(key)).subarray(0, candidate.length);
   return crypto.timingSafeEqual(Buffer.from(candidate), expected);
 }
 
@@ -219,8 +243,9 @@ function camouflagePiece(piece) {
 // luminance levels and remapped onto a random colour ramp - which rendered a
 // blue-grey patch of city as flat green, upside down. Players could not solve it,
 // and the numbers say why: with the candidates blanked and the piece recoloured,
-// nothing on screen relates the two, so four rounds of one-shot guessing at 1 in 4
-// is about a 1% chance of finishing an honest run.
+// nothing on screen relates the two, so a player was reduced to one-shot guessing
+// at 1 in 4 per round -- about a 1% chance of finishing the four-round era's run
+// honestly, and still a 75% run loss per puzzle in the one-round era.
 //
 // Removing those transforms costs nothing against a machine. The mechanical
 // matcher this is hardened against scores BOUNDARY continuity, and what denies it
@@ -298,13 +323,22 @@ function pngDataUrl(source) {
   return `data:image/png;base64,${png.toString('base64')}`;
 }
 
-function buildChallenge({ runId, seed, secret }) {
+// `rounds` is how many rounds this client renders and answers: V4.3 clients
+// declare CHALLENGE_ROUNDS, legacy clients declare nothing and get the full
+// legacy set. Round images are derived per round index, so a shorter payload
+// is a strict prefix of the longer one -- re-requesting at another count
+// reveals nothing a single request would not.
+function buildChallenge({ runId, seed, secret, rounds: roundCount }) {
   if (typeof runId !== 'string' || !runId || typeof seed !== 'string' || !seed || !secret) {
     throw new TypeError('challenge key material is required');
   }
+  const served = roundCount === undefined ? CHALLENGE_ROUNDS_LEGACY : roundCount;
+  if (!Number.isInteger(served) || served < 1 || served > CHALLENGE_ROUNDS_LEGACY) {
+    throw new RangeError('challenge round count must be an integer from 1 through legacy');
+  }
   const answers = expectedAnswers({ runId, seed, secret });
   const rounds = [];
-  for (let round = 0; round < CHALLENGE_ROUNDS; round += 1) {
+  for (let round = 0; round < served; round += 1) {
     const rng = makeRng(secret, runId, seed, round);
     const scene = renderScene(rng);
     const holes = challengeHoles(rng);
@@ -324,6 +358,7 @@ function buildChallenge({ runId, seed, secret }) {
 
 module.exports = {
   CHALLENGE_ROUNDS,
+  CHALLENGE_ROUNDS_LEGACY,
   buildChallenge,
   expectedAnswers,
   matchesAnswers,

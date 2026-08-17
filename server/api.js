@@ -61,6 +61,7 @@ const STATUS_BY_CODE = Object.freeze({
   invalid_event_type: 400,
   invalid_ban_reason: 400,
   invalid_challenge_answer: 400,
+  invalid_challenge_rounds: 400,
   challenge_not_started: 400,
   challenge_wrong_phase: 409,
   challenge_too_fast: 422,
@@ -103,6 +104,7 @@ const MESSAGE_BY_CODE = Object.freeze({
   invalid_event_type: 'Unknown event type',
   invalid_ban_reason: 'Unknown ban reason',
   invalid_challenge_answer: 'Submit exactly one choice for every verification round',
+  invalid_challenge_rounds: 'Request between one and four verification rounds',
   challenge_not_started: 'That visual verification was never started',
   challenge_wrong_phase: 'That visual verification was started outside its permitted game phase',
   challenge_too_fast: 'That visual verification completed too quickly to be trusted',
@@ -558,6 +560,9 @@ function createApiRouter(deps) {
             return sendChallengeRetry(res, retry.retryAfterMs, nowMs);
           }
           if (run.mode === 'practice') {
+            // Legacy-only gate (V4.3): a current practice client never starts
+            // a challenge; this keeps serving pre-V4.3 clients honestly until
+            // cached copies age out.
             const offsetMs = nowMs - run.chaseStartedAtMs;
             if (
               !Number.isFinite(offsetMs)
@@ -596,10 +601,15 @@ function createApiRouter(deps) {
           return fail(req, res, 'challenge_not_started');
         }
         res.setHeader('Cache-Control', 'no-store');
+        // V4.3: serve exactly the round count this client renders. Legacy
+        // clients declare nothing and get the full legacy set; the image
+        // stream is prefix-stable, so a re-request at another count reveals
+        // nothing new.
         return res.json(buildChallenge({
           runId: challengeRun.id,
           seed: challengeRun.challengeSeed,
           secret: config.sessionSecret,
+          rounds: parsed.value.rounds,
         }));
       }
 

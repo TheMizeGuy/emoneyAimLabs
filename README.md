@@ -18,19 +18,18 @@ tiny Windows-95-style popup window that does not want to be closed: it
 wanders the desktop, and the moment your cursor gets close, it flees
 faster. Click the beveled X in its title bar to end its life. The timer
 starts the moment the chase does, and misses, near-misses and your best
-time are tracked and saved locally. A one-attempt visual verification appears
-at a random point 0.5-1.8 seconds after Chase starts; its solve time is not part
-of the score. It has four independently seeded matching rounds. A wrong match
-fails only that run; repeated rapid mismatches add a brief retry delay capped at
-one minute, not an account ban.
+time are tracked and saved locally. Practice has no visual verification --
+it is just you against the window.
 
 **Simulation (LOUD!)** - TURN YOUR VOLUME DOWN FIRST. This mode is
 genuinely loud. It opens with a from-scratch Flappy-style gauntlet: flap
 through pipes until you reach 10 points in a single run (any death
 resets your score to zero). Clear that and the chase begins, now with a
 different face on the run and an 8-second audio loop playing at full
-volume for the rest of the round. The visual verification runs between Flappy
-and Chase, and the popup then spawns at a fresh random position.
+volume for the rest of the round. A one-attempt, single-round visual
+verification runs between Flappy and Chase, and the popup then spawns at a
+fresh random position. A wrong match fails only that run; repeated rapid
+mismatches add a brief retry delay capped at one minute, not an account ban.
 
 **Impossible (LOUD!)** - Simulation with the mercy removed. The gauntlet
 runs 20 percent faster, the window is meaningfully harder to pin down,
@@ -48,9 +47,10 @@ silent.
 The close button only responds to a real mouse click that arrives where
 the pointer actually is after a current multi-frame approach, and every ranked
 run uses the same 1120 x 620 playfield even if the browser is resized. The game
-keeps a running tally of anything that looks like tampering. Posted scores also
-need one fresh visual challenge, a single-use server run, server-timed phases,
-a two-sided elapsed-time check, and a paced heartbeat chain. High-confidence
+keeps a running tally of anything that looks like tampering. Posted Simulation
+and Impossible scores also need one fresh visual challenge; every posted score
+needs a single-use server run, server-timed phases, a two-sided elapsed-time
+check, and a paced heartbeat chain. High-confidence
 clock/challenge violations close the run and appear in the public Activity Log.
 An ordinary wrong visual match is recorded only as a failed run, never as a
 cheating accusation.

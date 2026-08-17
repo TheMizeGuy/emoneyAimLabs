@@ -10,7 +10,7 @@ const {
   createContext, playRun, sendBeat, signClaim, solveChallenge,
 } = require('./helpers');
 const { LIMITS, newRunToken } = require('../validation');
-const { CHALLENGE_ROUNDS, expectedAnswers } = require('../challenge');
+const { CHALLENGE_ROUNDS, CHALLENGE_ROUNDS_LEGACY, expectedAnswers } = require('../challenge');
 const chain = require('../chain');
 
 const FOREIGN_RUN_ID = newRunToken();
@@ -1287,7 +1287,8 @@ test('the visual challenge is server-owned, opaque and idempotent', async (t) =>
   assert.equal(first.headers.get('cache-control'), 'no-store');
   assert.deepEqual(Object.keys(first.json).sort(), ['rounds', 'version']);
   assert.equal(first.json.version, 1);
-  assert.equal(first.json.rounds.length, CHALLENGE_ROUNDS);
+  // A start that declares no round count is a legacy client: full legacy set.
+  assert.equal(first.json.rounds.length, CHALLENGE_ROUNDS_LEGACY);
   for (const round of first.json.rounds) {
     assert.match(round.scene, /^data:image\/png;base64,/);
     assert.match(round.piece, /^data:image\/png;base64,/);
@@ -1304,6 +1305,109 @@ test('the visual challenge is server-owned, opaque and idempotent', async (t) =>
   const stored = await ctx.store.getRun(runId);
   assert.equal(stored.challengeCount, 1);
   assert.match(stored.challengeSeed, /^[A-Za-z0-9_-]{43}$/);
+});
+
+// V4.3: current clients declare CHALLENGE_ROUNDS on challenge_start and answer
+// exactly that many rounds; the server serves the declared count and grades the
+// batch as a prefix of the same keyed answer stream the legacy set uses.
+test('the challenge endpoint serves and grades a declared single round', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+
+  const legacy = await client.post('/api/event', { type: 'challenge_start', runId });
+  assert.equal(legacy.status, 200);
+  const single = await client.post('/api/event', {
+    type: 'challenge_start', runId, rounds: CHALLENGE_ROUNDS,
+  });
+  assert.equal(single.status, 200);
+  assert.equal(single.json.rounds.length, CHALLENGE_ROUNDS);
+  assert.deepEqual(single.json.rounds[0], legacy.json.rounds[0],
+    'the single-round payload is a strict prefix of the legacy one');
+
+  const bad = await client.post('/api/event', {
+    type: 'challenge_start', runId, rounds: CHALLENGE_ROUNDS_LEGACY + 1,
+  });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error, 'invalid_challenge_rounds');
+
+  const run = await ctx.store.getRun(runId);
+  const answers = expectedAnswers({
+    runId, seed: run.challengeSeed, secret: ctx.config.sessionSecret,
+  });
+  ctx.clock.advance(LIMITS.MIN_CHALLENGE_SOLVE_MS);
+  const solved = await client.post('/api/event', {
+    type: 'challenge_solve', runId, answers: answers.slice(0, CHALLENGE_ROUNDS),
+  });
+  assert.equal(solved.status, 200);
+  assert.equal(solved.json.solved, true);
+  const settled = await ctx.store.getRun(runId);
+  assert.equal(settled.challengeSolvedCount, 1);
+});
+
+// V4.3: Practice plays clean. The same run shape playRun walks -- minus any
+// challenge traffic at all -- must submit and rank on the personal record.
+test('a practice score no longer requires the visual challenge', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  let token = created.json.chain;
+  ({ chain: token } = await sendBeat(client, runId, token, true));
+  for (let i = 0; i < 4; i += 1) {
+    ctx.clock.advance(5000);
+    ({ chain: token } = await sendBeat(client, runId, token, true));
+  }
+  const claim = { runId, timeMs: 20000, misses: 3, nearMisses: 4, sus: 0 };
+  claim.sig = signClaim(claim);
+  const submitted = await client.post('/api/score', claim);
+  assert.equal(submitted.status, 200);
+  assert.equal(submitted.json.bestMs, 20000);
+});
+
+// V4.3 regression guard. A pre-V4.3 practice client that opened its mid-run
+// puzzle deducts the solve span from its claim even when the solve response is
+// lost (outage, 5xx, the deploy itself); it carries on unranked with the clock
+// already shifted. The server never witnessed the solve, so it cannot deduct --
+// and if the practice challenge exemption let this claim reach the elapsed
+// comparisons, the honest 25 s shortfall would clear CLOCK_FORGERY_MARGIN_MS
+// and publish a clock-manipulation accusation under the player's name. It must
+// be refused challenge_required, in front of the clock checks, accusing no one.
+test('a legacy practice run with a lost challenge solve is refused, never accused', async (t) => {
+  const ctx = await createContext();
+  t.after(() => ctx.close());
+  await ctx.seedUser('1', 'player');
+  const client = ctx.clientFor('1');
+  const stream = ctx.collectFeed();
+  const created = await client.post('/api/run', { mode: 'practice' });
+  const runId = created.json.runId;
+  ctx.clock.advance(LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS);
+  assert.equal((await client.post('/api/event', {
+    type: 'challenge_start', runId,
+  })).status, 200);
+
+  // The player solves for ~25 s (the response never lands) and then wins a
+  // ~20 s chase; the legacy client claims chase time minus the puzzle span.
+  let token = created.json.chain;
+  for (let i = 0; i < 9; i += 1) {
+    ctx.clock.advance(5000);
+    ({ chain: token } = await sendBeat(client, runId, token, true));
+  }
+  const claim = { runId, timeMs: 20000, misses: 3, nearMisses: 4, sus: 0 };
+  claim.sig = signClaim(claim);
+  const refused = await client.post('/api/score', claim);
+  assert.equal(refused.status, 422);
+  assert.equal(refused.json.error, 'challenge_required');
+
+  assert.equal(stream.of('cheat_detected').length, 0, 'no public accusation');
+  assert.equal((await ctx.store.getRun(runId)).failed, false,
+    'a refusal is not a ban');
 });
 
 test('concurrent challenge starts and correct solves are idempotent', async (t) => {

@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { CHALLENGE_ROUNDS } = require('./challenge');
+const { CHALLENGE_ROUNDS_LEGACY } = require('./challenge');
 
 // Pure validation logic for the eMoney Aim Labs leaderboard API.
 // Nothing here touches the database, the network, or the clock: every input is
@@ -14,10 +14,11 @@ const { CHALLENGE_ROUNDS } = require('./challenge');
 const MODES = Object.freeze(['practice', 'simulation', 'impossible']);
 
 // Modes that play the bird gauntlet before Chase and complete their visual
-// challenge between the two. Practice opens at Chase start and is the odd one
-// out; Impossible is Simulation with a crueler Chase, so every server-side
-// timing rule treats them identically - including the 60 s shot-clock ceiling,
-// which both clients enforce.
+// challenge between the two. V4.3: the challenge gates ONLY these two
+// board-ranked modes; Practice plays clean (policy note in challenge.js).
+// Impossible is Simulation with a crueler Chase, so every server-side timing
+// rule treats them identically - including the 60 s shot-clock ceiling, which
+// both clients enforce.
 const GAUNTLET_MODES = Object.freeze(['simulation', 'impossible']);
 
 function hasGauntlet(mode) {
@@ -94,13 +95,18 @@ const LIMITS = Object.freeze({
   MIN_BEAT_SPACING_MS: 4000,
   // Sanity bound on the cosmetic counters.
   MAX_STAT: 10000,
-  // The visual puzzle is deliberately server-timed. A sub-second start/solve
-  // pair is a protocol script, not a person finding and dragging the piece.
-  MIN_CHALLENGE_SOLVE_MS: 1200,
+  // The visual puzzle is deliberately server-timed, and this floor BANS with a
+  // public accusation (challenge_too_fast), so it is sized for certainty, not
+  // for typical humans. It is not 1200/4: the fixed overhead (both network
+  // legs, the raster build and decode) does not scale with rounds. 1200
+  // covered four drags; 400 covers one perceive-and-drag plus both legs, and
+  // still catches an answer returned at protocol speed (~1 RTT, 30-80 ms).
+  MIN_CHALLENGE_SOLVE_MS: 400,
   // Kept in lockstep with the client's visible challenge countdown.
   MAX_CHALLENGE_SOLVE_MS: 60000,
-  // Practice promises an early random interruption, not a puzzle that can be
-  // prepaid at run creation or deferred until after the meaningful play.
+  // V4.3: Practice no longer challenges, but pre-V4.3 practice clients still
+  // request their promised early interruption; these bounds keep serving that
+  // legacy start-phase gate until cached copies age out.
   MIN_PRACTICE_CHALLENGE_OFFSET_MS: 500,
   MAX_PRACTICE_CHALLENGE_OFFSET_MS: 10000,
   // Simulation must flow promptly from its post-Flappy solve into Chase.
@@ -192,13 +198,24 @@ function parseEventBody(body) {
   }
   if (body.type === 'challenge_start') {
     if (!isRunToken(body.runId)) return { ok: false, code: 'invalid_run_id' };
-    return { ok: true, value: { type: body.type, runId: body.runId } };
+    // V4.3 clients declare how many rounds they render; legacy clients send
+    // nothing and are served the full legacy set.
+    if (body.rounds !== undefined && !isSafeInt(body.rounds, 1, CHALLENGE_ROUNDS_LEGACY)) {
+      return { ok: false, code: 'invalid_challenge_rounds' };
+    }
+    const value = { type: body.type, runId: body.runId };
+    if (body.rounds !== undefined) value.rounds = body.rounds;
+    return { ok: true, value };
   }
   if (body.type === 'challenge_solve') {
     if (!isRunToken(body.runId)) return { ok: false, code: 'invalid_run_id' };
+    // Length is the client's declared round count; the grade is a prefix match
+    // (see challenge.matchesAnswers), so one answer from a V4.3 client and
+    // four from a legacy client are both well formed.
     if (
       !Array.isArray(body.answers)
-      || body.answers.length !== CHALLENGE_ROUNDS
+      || body.answers.length < 1
+      || body.answers.length > CHALLENGE_ROUNDS_LEGACY
       || !body.answers.every((answer) => isSafeInt(answer, 0, 3))
     ) {
       return { ok: false, code: 'invalid_challenge_answer' };
@@ -377,35 +394,44 @@ function validateRunForScore(input) {
     return { ok: false, code: 'time_exceeds_elapsed', detail: { chasePhaseMs } };
   }
 
-  // Every leaderboard win must cross the visible canvas challenge. These are
+  // Every BOARD-RANKED win must cross the visible canvas challenge. These are
   // server timestamps written by two authenticated event requests, not fields
   // copied out of the score body. Requiring the latest started cycle to be the
   // latest solved cycle also prevents an old solve from paying for a newer
   // challenge that was shown during a longer run.
+  //
+  // V4.3: Practice is exempt -- its records rank on no board and the mid-run
+  // interruption was ruled pure annoyance. But a pre-V4.3 practice client
+  // still completes its challenge and deducts the solve span from the claim,
+  // so a completed challenge on a practice run must still come off the
+  // eligible window below, or time_below_elapsed would refuse every honest
+  // legacy practice win.
   const challengeMs = run.challengeSolvedAtMs - run.challengeStartedAtMs;
-  if (
-    !Number.isInteger(run.challengeCount)
-    || !Number.isInteger(run.challengeSolvedCount)
-    || run.challengeCount !== 1
-    || run.challengeSolvedCount !== 1
-    || typeof run.challengeSeed !== 'string'
-    || !CHALLENGE_SEED_RE.test(run.challengeSeed)
-    || !Number.isFinite(run.challengeStartedAtMs)
-    || !Number.isFinite(run.challengeSolvedAtMs)
-    || run.challengeStartedAtMs < run.issuedAtMs
-    || run.challengeSolvedAtMs > nowMs
-    || challengeMs < LIMITS.MIN_CHALLENGE_SOLVE_MS
-    || challengeMs > LIMITS.MAX_CHALLENGE_SOLVE_MS
-  ) {
+  const challengeComplete = Number.isInteger(run.challengeCount)
+    && Number.isInteger(run.challengeSolvedCount)
+    && run.challengeCount === 1
+    && run.challengeSolvedCount === 1
+    && typeof run.challengeSeed === 'string'
+    && CHALLENGE_SEED_RE.test(run.challengeSeed)
+    && Number.isFinite(run.challengeStartedAtMs)
+    && Number.isFinite(run.challengeSolvedAtMs)
+    && run.challengeStartedAtMs >= run.issuedAtMs
+    && run.challengeSolvedAtMs <= nowMs
+    && challengeMs >= LIMITS.MIN_CHALLENGE_SOLVE_MS
+    && challengeMs <= LIMITS.MAX_CHALLENGE_SOLVE_MS;
+  // A pre-V4.3 practice client that OPENED a puzzle deducts its span from the
+  // claim whether or not the solve response reached it (an absent answer is not
+  // a verdict; it carries on unranked with the clock already shifted). If the
+  // server never witnessed the solve it cannot deduct, and the resulting
+  // shortfall would sail past CLOCK_FORGERY_MARGIN_MS and publicly accuse an
+  // honest player of clock manipulation. Refuse exactly as pre-V4.3 did --
+  // the guard must stand IN FRONT of the elapsed comparisons. A V4.3 practice
+  // run never starts a challenge, so this leaves the exemption untouched.
+  if (run.mode === 'practice' && run.challengeStartedAtMs !== null && !challengeComplete) {
     return { ok: false, code: 'challenge_required' };
   }
-  if (run.mode === 'practice') {
-    const challengeOffsetMs = run.challengeStartedAtMs - run.chaseStartedAtMs;
-    if (
-      challengeOffsetMs < LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS
-      || challengeOffsetMs > LIMITS.MAX_PRACTICE_CHALLENGE_OFFSET_MS
-    ) return { ok: false, code: 'challenge_required' };
-  } else {
+  if (hasGauntlet(run.mode)) {
+    if (!challengeComplete) return { ok: false, code: 'challenge_required' };
     const challengeOffsetMs = run.challengeStartedAtMs - run.issuedAtMs;
     const challengeToChaseMs = run.chaseStartedAtMs - run.challengeSolvedAtMs;
     if (
@@ -415,10 +441,12 @@ function validateRunForScore(input) {
     ) return { ok: false, code: 'challenge_required' };
   }
 
-  // Practice displays the puzzle after its Chase clock begins, but puzzle time
-  // is not gameplay time. Simulation completes it before Chase and therefore
-  // has nothing to subtract. Both timestamps are server-owned.
-  const scoredChasePhaseMs = chasePhaseMs - (run.mode === 'practice' ? challengeMs : 0);
+  // A legacy practice client displays the puzzle after its Chase clock begins,
+  // but puzzle time is not gameplay time. Gauntlet modes complete it before
+  // Chase and V4.3 practice never sees one, so both subtract nothing. Both
+  // timestamps are server-owned.
+  const scoredChasePhaseMs = chasePhaseMs
+    - (run.mode === 'practice' && challengeComplete ? challengeMs : 0);
   if (!Number.isFinite(scoredChasePhaseMs) || scoredChasePhaseMs < 0) {
     return { ok: false, code: 'challenge_required' };
   }

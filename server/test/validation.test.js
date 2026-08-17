@@ -24,7 +24,7 @@ const {
 const chain = require('../chain');
 const { createRateLimiter } = require('../ratelimit');
 const { loadConfig } = require('../config');
-const { CHALLENGE_ROUNDS } = require('../challenge');
+const { CHALLENGE_ROUNDS, CHALLENGE_ROUNDS_LEGACY } = require('../challenge');
 const { TEST_ENV } = require('./helpers');
 
 const RUN_ID = newRunToken();
@@ -158,22 +158,44 @@ test('parseBeatBody requires a run token and a chain token', () => {
   assert.equal(parseBeatBody('string').code, 'invalid_body');
 });
 
-test('parseEventBody accepts only known types, complete challenge answers and ban reasons', () => {
+test('parseEventBody accepts only known types, well-sized challenge answers and ban reasons', () => {
   assert.deepEqual(parseEventBody({ type: 'flappy_death' }).value, { type: 'flappy_death' });
   assert.deepEqual(
     parseEventBody({ type: 'challenge_start', runId: RUN_ID }).value,
     { type: 'challenge_start', runId: RUN_ID },
   );
+  // V4.3: a client may declare how many rounds it renders, one through legacy.
+  assert.deepEqual(
+    parseEventBody({ type: 'challenge_start', runId: RUN_ID, rounds: CHALLENGE_ROUNDS }).value,
+    { type: 'challenge_start', runId: RUN_ID, rounds: CHALLENGE_ROUNDS },
+  );
+  assert.equal(parseEventBody({ type: 'challenge_start', runId: RUN_ID, rounds: 0 }).code,
+    'invalid_challenge_rounds');
+  assert.equal(parseEventBody({
+    type: 'challenge_start', runId: RUN_ID, rounds: CHALLENGE_ROUNDS_LEGACY + 1,
+  }).code, 'invalid_challenge_rounds');
+  assert.equal(parseEventBody({ type: 'challenge_start', runId: RUN_ID, rounds: '1' }).code,
+    'invalid_challenge_rounds');
+  // V4.3: answer batches are sized by the client's declared rounds -- one from
+  // a current client, four from a legacy one -- and graded as a prefix.
   const answers = Array.from({ length: CHALLENGE_ROUNDS }, (_, index) => index % 4);
   assert.deepEqual(
     parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers }).value,
     { type: 'challenge_solve', runId: RUN_ID, answers },
   );
+  const legacyAnswers = Array.from({ length: CHALLENGE_ROUNDS_LEGACY }, (_, index) => index % 4);
+  assert.deepEqual(
+    parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers: legacyAnswers }).value,
+    { type: 'challenge_solve', runId: RUN_ID, answers: legacyAnswers },
+  );
   assert.equal(parseEventBody({ type: 'challenge_start' }).code, 'invalid_run_id');
   assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID }).code, 'invalid_challenge_answer');
-  assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers: [0, 1] }).code,
+  assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers: [] }).code,
     'invalid_challenge_answer');
-  const outOfRange = answers.slice();
+  assert.equal(parseEventBody({
+    type: 'challenge_solve', runId: RUN_ID, answers: Array(CHALLENGE_ROUNDS_LEGACY + 1).fill(0),
+  }).code, 'invalid_challenge_answer');
+  const outOfRange = legacyAnswers.slice();
   outOfRange[outOfRange.length - 1] = 4;
   assert.equal(parseEventBody({ type: 'challenge_solve', runId: RUN_ID, answers: outOfRange }).code,
     'invalid_challenge_answer');
@@ -257,57 +279,33 @@ test('score validation accepts an honest practice run', () => {
   assert.equal(verdict.value.chasePhaseMs, 21000);
 });
 
-test('score validation requires a fresh server-witnessed visual challenge', () => {
-  assert.equal(
-    check(baseRun({
-      challengeSeed: null,
-      challengeStartedAtMs: null,
-      challengeSolvedAtMs: null,
-      challengeCount: 0,
-      challengeSolvedCount: 0,
-    }), 20000, 21000).code,
-    'challenge_required',
-  );
+test('score validation requires the visual challenge only in board-ranked modes', () => {
+  // V4.3: Practice plays clean. A run that never saw a challenge is accepted...
+  const noChallenge = {
+    challengeSeed: null,
+    challengeStartedAtMs: null,
+    challengeSolvedAtMs: null,
+    challengeCount: 0,
+    challengeSolvedCount: 0,
+  };
+  assert.equal(check(baseRun(noChallenge), 20000, 21000).ok, true,
+    'a V4.3 practice run never sees a challenge and needs none');
+  // ...but a legacy practice run that OPENED a puzzle the server never saw
+  // solved is refused, exactly as pre-V4.3: that client subtracted the puzzle
+  // span from its claim, the server cannot reconstruct it, and letting the
+  // claim fall through to the elapsed comparisons would read the shortfall as
+  // clock forgery and accuse an honest player publicly.
   assert.equal(
     check(baseRun({ challengeSolvedAtMs: null, challengeSolvedCount: 0 }), 20000, 21000).code,
     'challenge_required',
+    'a started-but-unsolved practice challenge refuses, in front of the clock checks',
   );
-  assert.equal(
-    check(baseRun({ challengeCount: 2, challengeSolvedCount: 1 }), 20000, 21000).code,
-    'challenge_required',
-  );
-  assert.equal(
-    check(baseRun({ challengeCount: 2, challengeSolvedCount: 2 }), 20000, 21000).code,
-    'challenge_required',
-    'one solved puzzle cannot be replayed into a second server cycle',
-  );
-  assert.equal(
-    check(baseRun({
-      challengeStartedAtMs: 1005000,
-      challengeSolvedAtMs: 1005000 + LIMITS.MIN_CHALLENGE_SOLVE_MS - 1,
-    }), 20000, 21000).code,
-    'challenge_required',
-  );
-  assert.equal(
-    check(baseRun({
-      challengeStartedAtMs: 1005000,
-      challengeSolvedAtMs: 1005000 + LIMITS.MIN_CHALLENGE_SOLVE_MS,
-    }), 20000, 21000).ok,
-    true,
-  );
-
-  assert.equal(check(baseRun({
-    challengeStartedAtMs: 1000000 + LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS - 1,
-    challengeSolvedAtMs: 1000000 + LIMITS.MIN_PRACTICE_CHALLENGE_OFFSET_MS
-      + LIMITS.MIN_CHALLENGE_SOLVE_MS,
-  }), 20000, 21000).code, 'challenge_required',
-  'Practice cannot start verification before its requested random window');
   assert.equal(check(baseRun({
     challengeStartedAtMs: 1000000 + LIMITS.MAX_PRACTICE_CHALLENGE_OFFSET_MS + 1,
     challengeSolvedAtMs: 1000000 + LIMITS.MAX_PRACTICE_CHALLENGE_OFFSET_MS
       + LIMITS.MIN_CHALLENGE_SOLVE_MS + 1,
-  }), 20000, 21000).code, 'challenge_required',
-  'Practice cannot defer verification until an arbitrary later point');
+  }), 20000, 21000).ok, true,
+  'a completed legacy practice challenge outside its old window still deducts, never refuses');
 
   const simulation = baseRun({
     mode: 'simulation',
@@ -319,6 +317,29 @@ test('score validation requires a fresh server-witnessed visual challenge', () =
   });
   assert.equal(check(simulation, 20000, 21000).ok, true,
     'Simulation accepts a challenge between Flappy and Chase');
+  assert.equal(
+    check(baseRun({ ...simulation, ...noChallenge }), 20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({ ...simulation, challengeSolvedAtMs: null, challengeSolvedCount: 0 }),
+      20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({ ...simulation, challengeCount: 2, challengeSolvedCount: 1 }), 20000, 21000).code,
+    'challenge_required',
+  );
+  assert.equal(
+    check(baseRun({ ...simulation, challengeCount: 2, challengeSolvedCount: 2 }), 20000, 21000).code,
+    'challenge_required',
+    'one solved puzzle cannot be replayed into a second server cycle',
+  );
+  assert.equal(check(baseRun({
+    ...simulation,
+    challengeSolvedAtMs: simulation.challengeStartedAtMs + LIMITS.MIN_CHALLENGE_SOLVE_MS - 1,
+  }), 20000, 21000).code, 'challenge_required',
+  'a sub-human solve span cannot back a ranked claim');
   assert.equal(check(baseRun({
     ...simulation,
     challengeStartedAtMs: 1020001,
@@ -337,6 +358,23 @@ test('score validation requires a fresh server-witnessed visual challenge', () =
     challengeSolvedAtMs: 1020000 - LIMITS.MAX_CHALLENGE_TO_CHASE_MS - 1,
   }), 20000, 21000).code, 'challenge_required',
   'Simulation cannot solve verification and then defer Chase indefinitely');
+});
+
+test('a completed legacy practice challenge still deducts its span from the window', () => {
+  // A pre-V4.3 practice client subtracts the solve span from its claim, so the
+  // server must keep doing the same or time_below_elapsed refuses every honest
+  // legacy practice win. baseRun's challenge spans 3000 ms inside a 21000 ms
+  // chase window: an 18000 ms claim only fits when that span comes off.
+  const deducted = check(baseRun(), 18000, 21000);
+  assert.equal(deducted.ok, true);
+  // The same claim with the solve never witnessed must be refused BEFORE the
+  // elapsed comparisons: the legacy client shifted its clock by the puzzle span
+  // either way, and an 18000 ms claim against an undeducted 21000 ms window is
+  // the exact shape the clock-forgery accusation is reserved for.
+  assert.equal(
+    check(baseRun({ challengeSolvedAtMs: null, challengeSolvedCount: 0 }), 18000, 21000).code,
+    'challenge_required',
+  );
 });
 
 test('score validation rejects unknown, foreign, replayed and closed runs', () => {

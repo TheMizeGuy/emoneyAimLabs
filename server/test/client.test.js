@@ -63,7 +63,6 @@ function lifecycleHarness(net) {
     beatPending: false,
     challengePromise: Promise.resolve(null),
     challengeVerified: false,
-    runOpenedWall: 0,
     running: null,
     chase,
     isSeam: false,
@@ -408,7 +407,7 @@ test('the winning press needs a current multi-frame aim journey', () => {
   const gate = sliceBetween(
     chase,
     '          if (!aimJourneyOK()) {',
-    '          if (!captchaComplete()) {',
+    '          if (CAPTCHA_ON && !captchaComplete()) {',
   );
   assert.match(gate, /addMiss\('aim-journey'\)/);
   assert.match(gate, /return;/);
@@ -420,12 +419,14 @@ test('the ranked Chase arming gate allows a 400 ms finish', () => {
   assert.match(chase, /var ARM_FRAMES\s*=\s*12;/);
 });
 
-test('every Chase win is gated by the visual CAPTCHA', () => {
+test('every board-ranked Chase win is gated by the visual CAPTCHA; Practice plays clean', () => {
   const chase = source('chase.js');
-  assert.match(chase, /var CAPTCHA_ON\s*=\s*true;/);
+  // V4.3: the captcha exists only in the gauntlet modes. Practice must neither
+  // show one nor hold its win press hostage to a puzzle that cannot come.
+  assert.match(chase, /var CAPTCHA_ON\s*=\s*PRESTART_CHALLENGE;/);
   const gate = sliceBetween(
     chase,
-    '          if (!captchaComplete()) {',
+    '          if (CAPTCHA_ON && !captchaComplete()) {',
     '          win();',
   );
   assert.match(gate, /showCaptcha\('win'\)/);
@@ -434,7 +435,8 @@ test('every Chase win is gated by the visual CAPTCHA', () => {
 
 test('the puzzle renders only a valid server challenge before accepting a drag', () => {
   const chase = source('chase.js');
-  assert.match(chase, /var CAPTCHA_ROUNDS\s*=\s*4;/);
+  // V4.3: one round, declared to the server on challenge_start.
+  assert.match(chase, /var CAPTCHA_ROUNDS\s*=\s*1;/);
   assert.doesNotMatch(chase, /INDEFINITE BAN/);
   const shown = sliceBetween(
     chase,
@@ -744,6 +746,18 @@ test('challenge solve sends all server-blind choices in one request', async () =
   assert.deepEqual(
     JSON.parse(harness.requests[0].options.body),
     { type: 'challenge_solve', runId: 'run-id', answers: [3, 0, 2, 1] },
+  );
+});
+
+test('challenge start declares the round count this client renders', async () => {
+  // V4.3: the server serves exactly the declared count; without the field a
+  // legacy server (or a legacy client) falls back to the four-round set.
+  const harness = netHarness();
+  await harness.net.event('challenge_start', '', 'run-id', { cycle: 1, rounds: 1 });
+  assert.equal(harness.requests.length, 1);
+  assert.deepEqual(
+    JSON.parse(harness.requests[0].options.body),
+    { type: 'challenge_start', runId: 'run-id', rounds: 1 },
   );
 });
 

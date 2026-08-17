@@ -169,7 +169,6 @@
   var challengePromise = Promise.resolve(null); // orders start -> solve for one run
   var challengeVerified = false;   // only a server `{solved:true}` qualifies a ranked run
   var challengeUnranked = false;   // keeps signed-out/offline local play usable
-  var runOpenedWall = 0;           // client-side guard for the server's Practice offset
   var inChase = false;             // V3.3: beats carry this once the chase is live
   var BEAT_MS = 5000;
   /* V3.6: practice runs still record and still travel the activity feed;
@@ -409,17 +408,9 @@
         challengeUnranked = true;
         return { unranked: true };
       }
-      var delayMs = 0;
-      if (stage === 'start' && running === 'practice' && runOpenedWall) {
-        delayMs = Math.max(0, 500 - (Date.now() - runOpenedWall));
-      }
-      return new Promise(function (resolve) {
-        if (delayMs > 0) window.setTimeout(resolve, delayMs);
-        else resolve();
-      }).then(function () {
-        if (gen !== runGen || !runId) return null;
-        return NET.event('challenge_' + stage, '', runId, detail || {});
-      });
+      // V4.3: the practice challenge-start pacing delay lived here; practice
+      // no longer challenges, so the request goes straight out.
+      return NET.event('challenge_' + stage, '', runId, detail || {});
     }, function () { return null; }).then(function (result) {
       if (stage === 'start' && !result) {
         challengeUnranked = true;
@@ -446,7 +437,6 @@
     runId = null;
     runNonce = '';
     runChain = '';
-    runOpenedWall = 0;
     challengeVerified = false;
     challengeUnranked = false;
     // A server retry delay is not a failed verification and is not one of the
@@ -469,7 +459,6 @@
     challengePromise = Promise.resolve(null);
     challengeVerified = false;
     challengeUnranked = false;
-    runOpenedWall = 0;
     stopBeats();
     resetBeatFlow();
     if (!NET || isSeam) return;
@@ -524,7 +513,6 @@
       runId = r.runId;
       runNonce = r.nonce;
       runChain = r.chain;              // V3.4 genesis token
-      runOpenedWall = Date.now();
       startBeats();
     }, function () {
       // net.js promises never reject, but a replacement client must not leave

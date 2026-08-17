@@ -8,6 +8,7 @@ const zlib = require('node:zlib');
 
 const {
   CHALLENGE_ROUNDS,
+  CHALLENGE_ROUNDS_LEGACY,
   buildChallenge,
   expectedAnswers,
   matchesAnswers,
@@ -87,9 +88,23 @@ test('server challenge payload is deterministic raster data that omits its seed 
 
   assert.deepEqual(first, second);
   assert.equal(first.version, 1);
-  assert.equal(first.rounds.length, CHALLENGE_ROUNDS);
+  // A request that declares no round count is a legacy client and gets the
+  // full legacy set.
+  assert.equal(first.rounds.length, CHALLENGE_ROUNDS_LEGACY);
   assert.equal(JSON.stringify(first).includes(SEED), false);
   assert.equal(Object.hasOwn(first, 'answers'), false);
+
+  // V4.3: a declared count serves exactly that many rounds, and the shorter
+  // payload is a strict prefix of the longer one -- re-requesting at another
+  // count reveals nothing new.
+  const single = buildChallenge({ runId: RUN_ID, seed: SEED, secret: SECRET, rounds: 1 });
+  assert.equal(single.rounds.length, 1);
+  assert.deepEqual(single.rounds[0], first.rounds[0]);
+  assert.throws(() => buildChallenge({ runId: RUN_ID, seed: SEED, secret: SECRET, rounds: 0 }));
+  assert.throws(() => buildChallenge({
+    runId: RUN_ID, seed: SEED, secret: SECRET, rounds: CHALLENGE_ROUNDS_LEGACY + 1,
+  }));
+  assert.throws(() => buildChallenge({ runId: RUN_ID, seed: SEED, secret: SECRET, rounds: '1' }));
 
   for (const round of first.rounds) {
     assert.match(round.scene, /^data:image\/png;base64,/);
@@ -112,7 +127,12 @@ test('server challenge payload is deterministic raster data that omits its seed 
 // +/-6 px and its lowest row sits 2 px clear of the floor, so nudging a base
 // down is exactly the edit this has to catch.
 test('every generated hole and start position is one the client will accept', () => {
+  // The client requests CHALLENGE_ROUNDS and tolerates up to the legacy count
+  // from a stale server; both constants are kept in lockstep with the client's
+  // source. The geometry sweep below still runs the full legacy set, which
+  // contains the requested prefix.
   assert.equal(CHALLENGE_ROUNDS, clientNumber('CAPTCHA_ROUNDS'));
+  assert.equal(CHALLENGE_ROUNDS_LEGACY, clientNumber('CAPTCHA_ROUNDS_LEGACY'));
 
   const maxX = clientNumber('CAP_W') - clientNumber('CAP_PIECE');
   const maxY = clientNumber('CAP_H') - clientNumber('CAP_PIECE');
@@ -124,7 +144,7 @@ test('every generated hole and start position is one the client will accept', ()
     const runId = `geometry-${index}`;
     const seed = Buffer.alloc(32, index + 1).toString('base64url');
     const payload = buildChallenge({ runId, seed, secret: SECRET });
-    assert.equal(payload.rounds.length, CHALLENGE_ROUNDS);
+    assert.equal(payload.rounds.length, CHALLENGE_ROUNDS_LEGACY);
 
     for (const round of payload.rounds) {
       assert.equal(round.holes.length, 4, 'the client requires exactly four candidates');
@@ -151,23 +171,33 @@ test('fresh seeds and server secrets produce independent visual challenges', () 
   assert.notEqual(a.rounds[0].scene, otherSecret.rounds[0].scene);
 });
 
-test('all independently keyed round answers are required in exact order', () => {
-  const answers = expectedAnswers({ runId: RUN_ID, seed: SEED, secret: SECRET });
-  assert.equal(answers.length, CHALLENGE_ROUNDS);
-  assert.equal(matchesAnswers(answers, { runId: RUN_ID, seed: SEED, secret: SECRET }), true);
+test('answer batches are graded as an exact-order prefix of the keyed stream', () => {
+  const key = { runId: RUN_ID, seed: SEED, secret: SECRET };
+  const answers = expectedAnswers(key);
+  assert.equal(answers.length, CHALLENGE_ROUNDS_LEGACY);
+  assert.equal(matchesAnswers(answers, key), true);
 
   for (let i = 0; i < answers.length; i += 1) {
     const wrong = answers.slice();
     wrong[i] = (wrong[i] + 1) % 4;
-    assert.equal(matchesAnswers(wrong, { runId: RUN_ID, seed: SEED, secret: SECRET }), false);
+    assert.equal(matchesAnswers(wrong, key), false);
   }
-  assert.equal(matchesAnswers(answers.slice(0, -1), { runId: RUN_ID, seed: SEED, secret: SECRET }), false);
-  assert.equal(matchesAnswers('0,1,2', { runId: RUN_ID, seed: SEED, secret: SECRET }), false);
+  // V4.3: a shorter batch is a valid prefix claim. A one-answer batch comes
+  // from a current client; a three-answer batch comes from no real client at
+  // all. Both grade against exactly the rounds they cover, still one-shot and
+  // in order.
+  assert.equal(matchesAnswers(answers.slice(0, 1), key), true);
+  assert.equal(matchesAnswers(answers.slice(0, -1), key), true);
+  assert.equal(matchesAnswers([(answers[0] + 1) % 4], key), false);
+  assert.equal(matchesAnswers([], key), false);
+  assert.equal(matchesAnswers(answers.concat(0), key), false);
+  assert.equal(matchesAnswers('0,1,2', key), false);
 });
 
 test('public raster boundaries do not reveal the answers to a mechanical edge matcher', () => {
   let correctRounds = 0;
   let correctRuns = 0;
+  let correctRoundZero = 0;
   const runCount = 40;
   for (let index = 0; index < runCount; index += 1) {
     const runId = `boundary-attack-${index}`;
@@ -183,9 +213,16 @@ test('public raster boundaries do not reveal the answers to a mechanical edge ma
     for (let round = 0; round < guesses.length; round += 1) {
       if (guesses[round] === answers[round]) correctRounds += 1;
     }
+    if (guesses[0] === answers[0]) correctRoundZero += 1;
     if (guesses.every((guess, round) => guess === answers[round])) correctRuns += 1;
   }
 
-  assert.ok(correctRounds / (runCount * CHALLENGE_ROUNDS) <= 0.45);
+  assert.ok(correctRounds / (runCount * CHALLENGE_ROUNDS_LEGACY) <= 0.45);
   assert.ok(correctRuns / runCount <= 0.15);
+  // V4.3: one round is a whole run, so round 0's hit rate IS the per-run bot
+  // pass rate. Blind guessing is 0.25; a rendering change that leaked round 0
+  // to the edge matcher would pass the two aggregate bounds above and still
+  // gut the fence. Measured 0.2525 over 400 runs at ship time.
+  assert.ok(correctRoundZero / runCount <= 0.35,
+    `round-0 edge-matcher hit rate ${correctRoundZero / runCount} exceeds the blind-guess band`);
 });

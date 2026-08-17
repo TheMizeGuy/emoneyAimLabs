@@ -7,6 +7,13 @@ dependencies, and logging.
 Report state: patched release candidate. Release and production verification are recorded separately
 in the repository history and deployment logs so this threat assessment does not become stale.
 
+Amendment 2026-08-17 (V4.3): the visual challenge is now a single round, served only in the
+board-ranked gauntlet modes; Practice plays without one and its records rank on no board. One blind
+attempt is therefore 1/4, not 1/256 -- the durable 0/5/15/30/60-second retry ramp and the one-shot
+run closure are now the load-bearing controls against blind-guess bursts. Pre-V4.3 clients are still
+served four rounds and graded as a prefix of the same keyed answer stream until cached copies age
+out. Historical findings below describe the four-round protocol they were verified against.
+
 ## Verdict
 
 The patched source closes the reproduced locator shortcut, timer-free pause, one-sided clock,
@@ -34,8 +41,9 @@ client path was exploitable independently of the production account.
 The custom visual challenge materially raises automation cost. The first exact edge-matching oracle
 solved 98% of three-round runs; identical candidate masks plus independent piece rotation/recoloring
 reduced that attack to chance in deterministic regression. A controlled browser/vision attempt still
-solved all three rounds of that hardened version. The shipped protocol therefore uses four
-independently keyed rounds (1/256 blind success per run) plus a durable 0/5/15/30/60-second retry ramp.
+solved all three rounds of that hardened version. The audited protocol used four independently
+keyed rounds (1/256 blind success per run); since V4.3 one keyed round ships (1/4 blind success),
+with the durable 0/5/15/30/60-second retry ramp and one-shot run closure carrying the burst defense.
 Success or ten quiet minutes resets the ramp. This is empirical friction, not an impossibility result.
 
 The remaining design limit is explicit: a browser-only game cannot prove a human supplied the input.
@@ -99,7 +107,7 @@ consumes the run and records the score exactly once.
 | AC-16 | Medium | Fixed | The advertised one-time challenge could be reopened after a solve, and a solve rejected as impossibly fast could wait and retry the same open run. Validator, SQL writer, and database constraint now enforce exactly one cycle; a too-fast solve closes the run. Ownership, expiry, replay, and terminal-state regressions pass. |
 | AC-17 | Medium | Fixed | Resizing below the old viewport-dependent play area made Chase easier and also created timer-free pause windows. Every ranked run now uses a centered 1120 x 620 field; smaller viewports pause input while wall-clock time keeps running, and larger viewports add scenery rather than escape room. |
 | AC-18 | Medium | Fixed | A cold run-open could settle after the visible challenge was solved, compressing server start/solve timestamps into a false automation verdict. The piece now stays inert until challenge-start acknowledgement, and Simulation does not start its local scored timer until solve plus the urgent server Chase stamp settle. |
-| AC-19 | Medium | Fixed | The browser used to own the challenge answer, so a modified client could emit the expected lifecycle and simply wait. The server now generates a fresh CSPRNG seed, stores it immutably on the owned run, returns raster scenes without seed/answer metadata, compares all four choices in constant time, and consumes an incorrect or impossibly fast attempt. Concurrent start/solve requests are idempotent. |
+| AC-19 | Medium | Fixed | The browser used to own the challenge answer, so a modified client could emit the expected lifecycle and simply wait. The server now generates a fresh CSPRNG seed, stores it immutably on the owned run, returns raster scenes without seed/answer metadata, compares the declared answer prefix in constant time, and consumes an incorrect or impossibly fast attempt. Concurrent start/solve requests are idempotent. |
 | AC-20 | Medium | Fixed with multi-account residual | Three four-choice rounds left a 1/64 blind success chance, while the route limits still permitted enough fresh runs to guess quickly. Four independent rounds reduce one blind attempt to 1/256. Server-observed mismatches durably ramp retry delay through 0/5/15/30/60 seconds, count once despite concurrent client reports, and reset on a correct solve or ten quiet minutes. A mismatch fails the run but never publishes `cheat_detected`; separate Twitch accounts or addresses remain a budget-evasion residual. |
 | FEED-01 | Medium | Fixed | The server and renderer supported `cheat_detected`, but `js/net.js` omitted it from the EventSource allowlist, silently discarding every live event. The transport allowlist and renderer are now covered together. |
 | AUTH-01 | Medium | Fixed; architecture residual remains | The fallback bearer persisted in `localStorage` on the shared `themizeguy.github.io` origin. It is now tab-scoped in `sessionStorage`, and legacy persistent copies are purged without migration. A same-origin sibling compromise can still reach the token in the same top-level context; isolate the game on a dedicated origin. |
@@ -137,11 +145,12 @@ consumes the run and records the score exactly once.
   structurally smaller than the server's window by one or two round trips, so a shortfall past 1.5
   seconds is refused, while only a shortfall past eight seconds closes the run and names the player
   publicly. A slow connection loses the score; a forged clock loses the run.
-- The visual challenge is freshly CSPRNG-seeded on the server, four rounds, one-attempt, and placed
-  after Flappy/before Chase in Simulation or 0.5-1.8 seconds into Practice. Simulation samples a new
-  independent x/y popup spawn after it closes. The browser receives only rasters and public candidate
-  coordinates; a visual solver can still recover the choices, so this remains friction rather than
-  proof.
+- The visual challenge is freshly CSPRNG-seeded on the server, one round since V4.3 (four for
+  pre-V4.3 clients, graded as a prefix of the same stream), one-attempt, and placed after
+  Flappy/before Chase in Simulation and Impossible only; Practice is unverified and ranks on no
+  board. Simulation samples a new independent x/y popup spawn after it closes. The browser receives
+  only rasters and public candidate coordinates; a visual solver can still recover the choices, so
+  this remains friction rather than proof.
 - A wrong visual choice fails only that run and is not called cheating. Rapid repeated mismatches add
   short server-persisted retry delays capped at 60 seconds; success or ten quiet minutes resets them.
 - A bot that solves the visual task can still wait out the real server windows and claim the configured
@@ -273,7 +282,7 @@ support for isolating a Pages site: [GitHub Pages custom domains](https://docs.g
 | Syntax/whitespace | `node --check` across server/client JavaScript and `git diff --check`: pass. |
 | Client manifest | SHA-256 of all five scripts exactly matches the embedded build manifest. |
 | Dependency state | `npm audit`: 0 vulnerabilities across 104 packages; `npm outdated`: empty. |
-| Browser runtime | Against the old gate, a native browser-input locator loop won Practice in 3.638 s. Exact boundary matching initially solved 98% of three-round raster runs; candidate masking and piece transformation reduced that regression to chance. A controlled browser/vision attempt then solved all three hardened rounds, proving the human-vs-bot residual. Four rounds now ship. The page produced Practice challenge timing inside the 0.5-1.8 s window, kept small viewports paused without refunding wall time, and rendered Simulation at 128 x 93 versus Practice at 136 x 172. |
+| Browser runtime | Against the old gate, a native browser-input locator loop won Practice in 3.638 s. Exact boundary matching initially solved 98% of three-round raster runs; candidate masking and piece transformation reduced that regression to chance. A controlled browser/vision attempt then solved all three hardened rounds, proving the human-vs-bot residual. Four rounds shipped from this audit (one since the V4.3 amendment above). The page produced Practice challenge timing inside the 0.5-1.8 s window, kept small viewports paused without refunding wall time, and rendered Simulation at 128 x 93 versus Practice at 136 x 172. |
 | Direct-protocol adversarial probe | Against the preceding client-answer design, a modified authenticated client emitted the signed lifecycle and waited 700 ms without Chase; the server returned HTTP 200/rank 1. The current no-answer and wrong-answer versions are rejected and cannot qualify a run. AC-13/API6 remains because the controlled vision attempt recovered the server-owned answers. |
 | Physics | Deterministic earliest Simulation handoff: 15.922 s; exact 400 ms Practice and Simulation API boundaries pass, while the measured clean browser run remains 1.839 s. |
 | Pre-release production data | Read-only PostgreSQL checks: 0 duplicate open users, 0 invalid run-state/counter groups observed, 0 orphan submission rows, and 0 submission rows incompatible with new constraints. No records were altered during the audit. |

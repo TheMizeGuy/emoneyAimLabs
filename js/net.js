@@ -283,6 +283,8 @@
     if (reason) body.reason = reason;
     if (runId) body.runId = runId;
     if (detail && Array.isArray(detail.answers)) body.answers = detail.answers.slice();
+    // V4.3: challenge_start declares how many rounds this client renders.
+    if (detail && typeof detail.rounds === 'number') body.rounds = detail.rounds;
     return call('POST', '/api/event', body,
       type === 'challenge_start' || type === 'challenge_solve');
   }

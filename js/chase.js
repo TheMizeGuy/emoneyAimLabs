@@ -323,9 +323,12 @@
     var SHOCK_IMPULSE   = 1600;  // px/s added at zero distance, scaled by (1 - d/range)^2 (v2 1250)
     var SHOCK_BURST_MS  = 600;   // brief burst that stacks with the taunt burst
 
-    /* V3.10 -- one visual challenge per run. Simulation puts it between the
-       gauntlet and the scored Chase. Practice has no preceding phase, so its
-       challenge arrives at an unpredictable point near the start instead. */
+    /* V3.10 -- one visual challenge per run, between the gauntlet and the
+       scored Chase. V4.3: gauntlet modes only, and one round (the policy note
+       lives with the server's constant in server/challenge.js). The timed
+       mid-run trigger plumbing below (MIN/MAX, MISS_*) is unreachable in ALL
+       modes now -- CAPTCHA_TIMED is CAPTCHA_ON's exact complement -- and
+       survives only as inert guards, scheduled for deletion. */
     var CAPTCHA_MIN_MS  = 500;
     var CAPTCHA_MAX_MS  = 1800;
     var CAPTCHA_MISS_MIN = 15;    // or this many misses, rolled per run...
@@ -333,7 +336,8 @@
     var CAPTCHA_TOL     = 12;     // forgiving snap radius; candidates are widely separated
     var CAPTCHA_BEAT_MS = 450;    // success beat before the dialog closes
     var CAPTCHA_LIMIT_MS = 60000; // V2.14: the countdown, and one drop only
-    var CAPTCHA_ROUNDS = 4;
+    var CAPTCHA_ROUNDS = 1;       // V4.3: what this client requests and renders
+    var CAPTCHA_ROUNDS_LEGACY = 4; // what a stale server still serves; tolerated, not requested
     var CAP_W = 260, CAP_H = 140, CAP_PIECE = 46;
 
     /* V2.19 -- the simulation shot clock. Sixty seconds of scored Chase time to
@@ -735,8 +739,11 @@
     var campX = 0, campY = 0, campAt = -1e9, cursorParked = false;
 
     /* V2.12 captcha, all closure-local per V2.6 layer 1. */
-    var CAPTCHA_ON = true;
     var PRESTART_CHALLENGE = (opts.challengeBeforeStart === true);
+    /* V4.3: the captcha belongs to the board-ranked gauntlet modes only.
+       Practice never shows one, so every timed/miss trigger below is inert
+       there, and the win press must not wait on a puzzle that cannot come. */
+    var CAPTCHA_ON = PRESTART_CHALLENGE;
     var CAPTCHA_TIMED = !PRESTART_CHALLENGE;
     var SHOT_CLOCK_ON = (MODE_LABEL === 'SIMULATION' || IMPOSSIBLE);
     var shotLeftShown = -1;
@@ -1051,8 +1058,9 @@
       startWall = WALL();
       startWall2 = wall2();
       simT = NOW();
-      // Practice gets one challenge 0.5-1.8 s into Chase. Simulation has already
-      // completed its challenge before this timer starts.
+      // V4.3: no mode schedules a mid-run challenge any more -- gauntlet modes
+      // complete theirs before this timer starts and Practice has none. The
+      // call is a retired no-op (see the CAPTCHA constants note).
       scheduleCaptcha(NOW());
       LOG('[AIMLAB] START');
     }
@@ -1515,10 +1523,15 @@
     }
 
     function validChallenge(payload) {
+      /* V4.3: ask for one round, but render up to the legacy four if a stale
+         server ignores the request -- a mismatched deploy must degrade to the
+         old puzzle, never to banPlayer over a payload the player could have
+         solved. */
       return !!payload
         && payload.version === 1
         && Array.isArray(payload.rounds)
-        && payload.rounds.length === CAPTCHA_ROUNDS
+        && payload.rounds.length >= CAPTCHA_ROUNDS
+        && payload.rounds.length <= CAPTCHA_ROUNDS_LEGACY
         && payload.rounds.every(validRound);
     }
 
@@ -1543,8 +1556,11 @@
       capArmed = false;
       capUsed = false;
       capPiece.style.visibility = 'hidden';
-      setText(capText, 'Round ' + (capRound + 1) +
-        ' of ' + CAPTCHA_ROUNDS + '. Match the shapes; the piece may be rotated and recolored.');
+      /* V4.3: one round is the norm; the counter reappears only when a stale
+         server serves the legacy multi-round set. */
+      var capTotal = (capPayload && capPayload.rounds) ? capPayload.rounds.length : CAPTCHA_ROUNDS;
+      setText(capText, (capTotal > 1 ? 'Round ' + (capRound + 1) + ' of ' + capTotal + '. ' : '')
+        + 'Match the shapes. Drag the piece to the slot it came from.');
 
       return Promise.all([loadRaster(round.scene), loadRaster(round.piece)]).then(function (images) {
         if (
@@ -1588,7 +1604,7 @@
     function showCaptcha(reason) {
       if (!CAPTCHA_ON || capBroken || capShown || won || stopped || banned) return;
       // Disarm both triggers for the duration. Nothing becomes draggable until
-      // the authenticated start request returns four well-formed server rasters.
+      // the authenticated start request returns well-formed server rasters.
       capAt = Infinity;
       capMissTarget = 0;
       capCycle++;
@@ -1610,7 +1626,11 @@
       capBox.classList.remove('hide');
       dropPointer();                 // the card carries on as if the cursor had left
       LOG('[AIMLAB] CAPTCHA SHOWN reason=' + reason);
-      Promise.resolve(challengeSignal('start', { cycle: capCycle })).then(function (payload) {
+      // V4.3: declare how many rounds this client renders; the server serves
+      // exactly that many. Legacy servers ignore the field and serve four,
+      // which validChallenge tolerates.
+      Promise.resolve(challengeSignal('start', { cycle: capCycle, rounds: CAPTCHA_ROUNDS }))
+        .then(function (payload) {
         if (!capShown || stopped || banned) return;
         if (payload && payload.unranked === true) {
           setText(capText, 'Leaderboard unavailable. Continuing as an unranked run.');
@@ -1625,12 +1645,11 @@
           /* Every other refusal used to fall through to captcha-fail, which
              tells the player "That is not where the piece goes." about a puzzle
              that never rendered and posts a public ban line under their name.
-             It is reachable honestly: a Practice run paused past the server's
-             challenge-offset window comes back with challenge_wrong_phase, which
-             is a player losing a race rather than answering wrongly. Carry on
-             unranked instead. The server still requires a completed challenge,
-             so the score is refused with challenge_required rather than
-             credited -- nothing rankable is gained by never seeing the puzzle. */
+             A refusal here is a player losing a race (phase windows, retries),
+             not answering wrongly. Carry on unranked instead. The server still
+             requires a completed challenge for a ranked claim, so the score is
+             refused with challenge_required rather than credited -- nothing
+             rankable is gained by never seeing the puzzle. */
           setText(capText, 'Verification unavailable. Continuing as an unranked run.');
           acceptChallenge(true);
           return;
@@ -1646,10 +1665,10 @@
     function acceptChallenge(unranked) {
       if (!capShown || capSolvedCount > 0) return;
       var solveMs = Math.round(NOW() - capShownAt);
-      // Verification is mandatory but not part of a Practice score. Move all
-      // three captured clock origins together so the displayed/attested timer
-      // resumes from the instant the puzzle appeared. The server independently
-      // subtracts its own challenge timestamps from the eligible window.
+      // Retired mid-run branch (V4.3): only a pre-V4.3 Practice client showed
+      // a puzzle after its clock started, and this rebase kept puzzle time out
+      // of its score while the server deducted the same span independently.
+      // Unreachable now -- CAPTCHA_TIMED is never true where a captcha shows.
       if (CAPTCHA_TIMED && started && solveMs > 0) {
         shStartT.set(shStartT.get() + solveMs);
         startWall += WALL() - capShownWall;
@@ -1664,9 +1683,11 @@
     }
 
     function solveCaptcha() {
-      if (!capShown || capAnswers.length !== CAPTCHA_ROUNDS) return;
+      // V4.3: the payload's own length is the round count -- one normally,
+      // legacy four if a stale server ignored the request.
+      if (!capShown || !capPayload || capAnswers.length !== capPayload.rounds.length) return;
       capArmed = false;
-      setText(capText, 'Checking all four matches...');
+      setText(capText, 'Checking the match...');
       var solveMs = Math.round(NOW() - capShownAt);
       Promise.resolve(challengeSignal('solve', {
         cycle: capCycle,
@@ -2734,7 +2755,7 @@
             addMiss('folder-open');
             return;
           }
-          if (!captchaComplete()) {
+          if (CAPTCHA_ON && !captchaComplete()) {
             showCaptcha('win');
             return;
           }
@@ -3255,8 +3276,8 @@
       if (--attestIn <= 0) { attestIn = ATTEST_FRAMES; checkStructure(); attest(); }
 
       if (started) {
-        // Hold the visible number while the timed Practice puzzle is unsolved;
-        // solveCaptcha then removes the same interval from every clock origin.
+        // Retired mid-run freeze (V4.3): held the visible number while a
+        // pre-V4.3 Practice puzzle was unsolved. The ternary is inert now.
         var clockNow = (CAPTCHA_TIMED && capShown && capBeatT === 0) ? capShownAt : t;
         setText(elTime, fmt(clockNow - shStartT.get()));
       }
