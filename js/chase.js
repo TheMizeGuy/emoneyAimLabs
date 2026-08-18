@@ -5,12 +5,12 @@
      1. Componentisation. All state lives inside start(), the markup is built in
         JS, element lookups use data-el attributes instead of document ids, and
         every listener goes through on() so stop() can unwind them.
-     2. Caller-supplied config: image, localStorage key, optional audio loop.
+     2. Caller-supplied config: image, localStorage key.
      3. V2.1 playfield: the flat Windows 95 desktop teal, no grid or range rings.
      4. V2.2/V2.3 window: exact Win95 chrome (two-step bevel, navy title bar,
         bevelled close button flush right inside the bar) wrapped tightly around
         the image at its native size -- no plate, no padding, no caption.
-     5. V2.2 difficulty retune and the V2.4 synthesized error chord on every miss.
+     5. V2.2 difficulty retune.
      6. V2.6 anti-cheat annoyance. Client-side cheating cannot be prevented; the
         bar is "annoying enough not to bother". See ANTI-CHEAT below.
 
@@ -19,12 +19,11 @@
        imageSrc,          // string, default './assets/emoney.png'
        imageW, imageH,    // intrinsic pixels; the window is built around them
        bestKey,           // localStorage key, default 'emoney-aimlabs-best'
-       audio,             // null  -> the chase owns its own AudioContext
-                          // object-> the caller owns audio: { ctx, buffer }, either may
-                          //          be null until ready; hand updates over with setAudio
        recordBest,        // false on QA-seam runs: play normally, record nothing
        onWin              // optional fn(stats)
-     }) -> frozen { stop(), setAudio(audio) }
+     }) -> frozen { stop() }
+
+   The engine is silent: it never constructs an AudioContext or plays a sound.
 
    ANTI-CHEAT (V2.6), all annoyance and never a lock -- a player who does not
    open devtools sees none of it:
@@ -442,17 +441,6 @@
       SHOCK_IMPULSE      = 2100;
     }
 
-    /* V2.4: the error chord, synthesized. No Microsoft audio is fetched or shipped. */
-    var ERROR_MS         = 200;   // total voice length
-    var ERROR_ATTACK     = 0.008; // s
-    var ERROR_GAIN       = 0.22;  // moderate, so the 8 s loop stays dominant in simulation
-    var ERROR_MAX_VOICES = 4;     // click spam is capped instead of stacking into clipping
-    var ERROR_CHORD = [
-      { type: 'triangle', freq: 233.08, gain: 0.55, detune: -7 },  // Bb3
-      { type: 'triangle', freq: 349.23, gain: 0.42, detune:  7 },  // F4
-      { type: 'square',   freq: 466.16, gain: 0.16, detune:  0 }   // Bb4, adds the buzz
-    ];
-
     /* V2.6 anti-cheat */
     var CLOCK_TOLERANCE_MS = 750;  // allowed disagreement between the TWO WALL references
     /* F3. A wall-clock discontinuity used to VOID the run: closing a laptop lid,
@@ -466,7 +454,6 @@
     var CLOCK_DRIFT_MAX    = 5000; // slow divergence between monotonic and wall
     var CLOCK_REBASE_MAX   = 6;    // absorbed discontinuities before it is a stepper
     var CLOCK_RAF_TOL      = 3000; // performance.now() against the frame timestamp
-    var CLOCK_AUDIO_TOL    = 1500; // the audio-thread cross-check, deliberately loose
     var CLOCK_STEP_MS      = 400;  // a single-frame jump between them reads as a splice
     var TAMPER_DEBOUNCE_MS = 800;  // one taunt per burst of meddling, not one per mutation
     var SHAME_MUL          = 1.15; // shame mode: the card gets 15 percent quicker
@@ -800,7 +787,6 @@
     var clkSum = 0, clkPair = -1, clkStill = 0;
     var clkRebases = 0, rafSkew0 = null;
     var startWall2 = 0;
-    var audioT0 = -1, audioWall0 = 0, audioBad = 0;
     var tamperAt = -1e9, shame = 1;
     var mo = null, mo2 = null, geomDirty = false;
 
@@ -839,7 +825,7 @@
     var hiddenFrames = 0, hiddenLies = false, pauseFrames = 0, stallFlagged = false;
 
     // F5 quality: timers that must not outlive stop()
-    var storeTimer = 0, voiceTimers = [];
+    var storeTimer = 0;
 
     // taunt placement, recomputed from cached numbers so render() reads no layout
     var tauntOn = false, tauntW = 0;
@@ -861,13 +847,6 @@
 
     // V2.7 layer G: the win signature, once it has been computed
     var winSig = '';
-
-    // When the caller passes an audio object it owns the AudioContext, so the
-    // chase never constructs a second one; practice passes null and owns nothing,
-    // so the chase makes its own context lazily inside a miss click.
-    var audio = opts.audio || null;
-    var audioSource = null, audioStarted = false, audioArmed = false;
-    var errVoices = [];
 
     /* ---------------- helpers ---------------- */
 
@@ -957,7 +936,6 @@
     function onStateDivergence() {
       if (stateBad) return;
       stateBad = true;
-      playError();
       if (!won) win();
       else logCheat('state');
     }
@@ -1070,7 +1048,6 @@
       shMisses.set(n);
       setText(elMiss, n);
       LOG('[AIMLAB] MISS n=' + n + (reason ? (' reason=' + reason) : ''));
-      playError();
       if (capMissTarget > 0 && n >= capMissTarget) showCaptcha('misses');
     }
 
@@ -1104,7 +1081,6 @@
       if (t - tamperAt < TAMPER_DEBOUNCE_MS) return false;
       tamperAt = t;
       showTaunt(text);
-      playError();
       return true;
     }
 
@@ -1128,8 +1104,6 @@
         if (jump > CLOCK_STEP_MS) {
           startWall += (w - p);          // d becomes 0
           startWall2 = wall2() - p;
-          audioT0 = -1;
-          audioBad = 0;
           if (++clkRebases > CLOCK_REBASE_MAX) clkStep = true;
           w = WALL() - startWall;
           d = p - w;
@@ -1167,25 +1141,6 @@
          are reached through function objects the first pair does not share. */
       var w2 = wall2() - startWall2;
       if (Math.abs(w2 - w) > CLOCK_TOLERANCE_MS) clkStep = true;
-
-      /* The audio clock advances on the audio thread and is not reachable from
-         JS at all. Only simulation has a context, and only while it is actually
-         running -- a suspended or freshly resumed context re-baselines instead
-         of accusing. Three consecutive violations at a generous threshold keeps
-         it clear of ordinary audio-clock drift. */
-      var actx = audio && audio.ctx;
-      if (actx && actx.state === 'running') {
-        if (audioT0 < 0) { audioT0 = actx.currentTime; audioWall0 = w; }
-        else {
-          var ad = (actx.currentTime - audioT0) * 1000 - (w - audioWall0);
-          if (Math.abs(ad) > CLOCK_AUDIO_TOL) {
-            if (++audioBad >= 3) clkStep = true;
-          } else if (audioBad > 0) audioBad--;
-        }
-      } else {
-        audioT0 = -1;
-        audioBad = 0;
-      }
     }
 
     function clockIsSuspect() {
@@ -1737,8 +1692,8 @@
       arm();
     }
 
-    /* V2.14. A failed verification ends the run: the audio stops, the captcha
-       closes and the ban overlay takes the screen. Neither button is a win path,
+    /* V2.14. A failed verification ends the run: the captcha closes and the
+       ban overlay takes the screen. Neither button is a win path,
        so neither is presence-gated -- any trusted click is enough. */
     function banPlayer(reason, retryAfterSeconds) {
       if (banned || won || stopped) return;
@@ -1754,8 +1709,6 @@
       capDrag = false;
       capBeatT = 0;
       capBox.classList.add('hide');
-      stopAudio();
-      killErrorVoices();
       setText(banTitle, reason === 'challenge-retry' ? 'PLEASE WAIT' : 'RUN FAILED');
       setText(banSub, (reason === 'challenge-retry')
         ? 'Too many recent mismatches. Try a fresh run in ' +
@@ -1899,7 +1852,6 @@
       shame = SHAME_MUL;
       setText(shameText, SHAME_TEXT);
       shameBox.classList.remove('hide');
-      playError();
     }
 
     function isToolsKey(e) {
@@ -1909,123 +1861,6 @@
       if (e.ctrlKey && e.shiftKey) return true;      // Windows and Linux
       if (e.metaKey && e.altKey) return true;        // macOS
       return false;
-    }
-
-    /* ---------------- audio ---------------- */
-
-    // Simulation hands its context down; practice builds one on the first miss,
-    // which is itself a click and therefore a qualifying gesture.
-    /* V2.8: the caller owns every AudioContext there is. Simulation hands one
-       down; practice hands down nothing and is therefore silent -- no error
-       chord, no context, no autoplay surface at all. The engine no longer
-       builds its own under any circumstances. */
-    function getCtx() {
-      return (audio && audio.ctx) ? audio.ctx : null;
-    }
-
-    // An AudioBufferSourceNode looping the whole buffer is sample-accurate, and
-    // the source is uncompressed PCM, so there is no encoder padding to click on.
-    // Wired straight to the destination, so the loop plays at full gain.
-    function tryStartAudio() {
-      if (stopped || won || audioStarted) return;
-      if (!audio || !audio.ctx || !audio.buffer) return;
-      var ctx = audio.ctx;
-      if (ctx.state === 'suspended') {
-        armAudioGesture();
-        resumeCtx(ctx);
-        return;
-      }
-      audioStarted = true;
-      audioSource = ctx.createBufferSource();
-      audioSource.buffer = audio.buffer;
-      audioSource.loop = true;
-      audioSource.connect(ctx.destination);
-      audioSource.start(0);
-      LOG('[AIMLAB] AUDIO LOOP STARTED');
-    }
-
-    function resumeCtx(ctx) {
-      var p;
-      try { p = ctx.resume(); } catch (e) { return; }
-      if (p && p.then) p.then(tryStartAudio, function () { /* stays blocked until a gesture */ });
-    }
-
-    function onAudioGesture(e) {
-      if (!e.isTrusted || !audio || !audio.ctx) return;
-      resumeCtx(audio.ctx);
-    }
-
-    function armAudioGesture() {
-      if (audioArmed) return;
-      audioArmed = true;
-      on(window, 'pointerdown', onAudioGesture, true);
-    }
-
-    // V2.4: a short synthesized error chord. Two detuned triangles carry the
-    // chord, a quiet square adds the 8-bit buzz, everything decays inside 200 ms.
-    function playError() {
-      if (stopped) return;
-      var ctx = getCtx();
-      if (!ctx) return;
-      if (ctx.state === 'suspended') resumeCtx(ctx);
-      if (ctx.state !== 'running') return;
-      if (errVoices.length >= ERROR_MAX_VOICES) return;
-
-      var t0 = ctx.currentTime;
-      var dur = ERROR_MS / 1000;
-      var master = ctx.createGain();
-      master.gain.value = ERROR_GAIN;
-      master.connect(ctx.destination);
-
-      for (var i = 0; i < ERROR_CHORD.length; i++) {
-        var v = ERROR_CHORD[i];
-        var osc = ctx.createOscillator();
-        var g = ctx.createGain();
-        osc.type = v.type;
-        osc.frequency.value = v.freq;
-        if (osc.detune) osc.detune.value = v.detune;
-        // exponential ramps cannot touch zero, so the envelope runs between
-        // near-silence and the voice level
-        g.gain.setValueAtTime(0.0001, t0);
-        g.gain.exponentialRampToValueAtTime(v.gain, t0 + ERROR_ATTACK);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-        osc.connect(g);
-        g.connect(master);
-        osc.start(t0);
-        osc.stop(t0 + dur + 0.02);
-      }
-
-      errVoices.push(master);
-      var reap = DELAY(function () {
-        var at = errVoices.indexOf(master);
-        if (at >= 0) errVoices.splice(at, 1);
-        var ti = voiceTimers.indexOf(reap);
-        if (ti >= 0) voiceTimers.splice(ti, 1);
-        try { master.disconnect(); } catch (e) { /* already detached */ }
-      }, ERROR_MS + 80);
-      voiceTimers.push(reap);
-    }
-
-    function stopAudio() {
-      if (!audioSource) return;
-      try { audioSource.stop(0); } catch (e) { /* already stopped */ }
-      try { audioSource.disconnect(); } catch (e) { /* already detached */ }
-      audioSource = null;
-    }
-
-    function killErrorVoices() {
-      for (var i = 0; i < errVoices.length; i++) {
-        try { errVoices[i].disconnect(); } catch (e) { /* already detached */ }
-      }
-      errVoices.length = 0;
-    }
-
-    // Lets the caller hand over the context, or a buffer that finished decoding
-    // after the chase had already started.
-    function setAudio(a) {
-      if (stopped || won) return;
-      audio = a || null;
-      tryStartAudio();
     }
 
     /* ---------------- layout ---------------- */
@@ -2111,7 +1946,6 @@
          live run, then claim a shorter score. The fixed field makes the pause
          fair; the two-sided server clock makes it enforceable. */
       clkLast = null; clkPair = -1; clkStill = 0; rafSkew0 = null;
-      audioT0 = -1; audioBad = 0;
       accumMs = 0;
       simT = NOW();
       lastT = NOW();
@@ -2565,10 +2399,9 @@
       var pick = closed[Math.floor(rnd() * closed.length) % closed.length];
       pick.holder.open = true;
       openFolderWindow(pick.name, pick.holder, true);
-      // The pop already announces itself twice -- the window and the chord --
-      // so it defers to any taunt currently explaining a refused press.
+      // The pop already announces itself with the window, so it defers to any
+      // taunt currently explaining a refused press.
       if (!tauntOn) showTaunt(TAUNT_AUTOPOP);
-      playError();
     }
 
     /* ---------------- input: press, click, keys ---------------- */
@@ -2689,13 +2522,13 @@
       /* `banned` belongs on this line as much as `won` does. The failure screen
          covers the page and carries two buttons, and every press of one used to
          run the playfield handler below: an [AIMLAB] MISS line after
-         [AIMLAB] RUN FAILED, an error chord and a shockwave, all against a run
-         that had already ended. */
+         [AIMLAB] RUN FAILED and a shockwave, all against a run that had
+         already ended. */
       if (won || banned || paused || capShown) return;
 
       // The engine's own dialogs are not the playfield. Dismissing the shame box
-      // used to cost the player a miss and an error chord for a dialog the game
-      // put in front of them. Folder windows ride the same rule: opening one
+      // used to cost the player a miss for a dialog the game put in front of
+      // them. Folder windows ride the same rule: opening one
       // was the miss; closing it must not be another.
       if (shameBox.contains(e.target) || overlay.contains(e.target) ||
           pauseBox.contains(e.target) || banBox.contains(e.target) ||
@@ -3378,7 +3211,6 @@
       // drop any transform layer D stamped, or the pop-out keyframes lose to it
       card.style.removeProperty('transform');
       card.classList.add('gone');
-      stopAudio();
 
       // The only two things that void a run: three copies of a number that no
       // longer agree (here or in flappy), and two clocks that no longer agree.
@@ -3390,7 +3222,6 @@
 
       if (cheated) {
         logCheat(kind);
-        playError();
       } else {
         // Layer G signs asynchronously. The overlay is on a 300 ms delay and a
         // digest of a 40-character string resolves in well under that, so the
@@ -3528,10 +3359,6 @@
       UNDELAY(tauntTimer);
       UNDELAY(winTimer);
       UNDELAY(storeTimer);
-      for (var vi = 0; vi < voiceTimers.length; vi++) UNDELAY(voiceTimers[vi]);
-      voiceTimers.length = 0;
-      stopAudio();
-      killErrorVoices();
       if (mo) { mo.disconnect(); mo = null; }
       if (mo2) { mo2.disconnect(); mo2 = null; }
       offAll();
@@ -3571,8 +3398,6 @@
       });
     }
 
-    tryStartAudio();
-
     lastT = NOW();
     simT = lastT;
     checkPlayable();
@@ -3586,7 +3411,7 @@
     rafId = RAF(frame);
     watchdog = EVERY(heartbeat, 500);
 
-    return Object.freeze({ stop: stop, setAudio: setAudio, winExtras: winExtras });
+    return Object.freeze({ stop: stop, winExtras: winExtras });
   }
 
   // Frozen so the module cannot be edited from the console, and defined as a

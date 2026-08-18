@@ -17,10 +17,10 @@
 <script type="application/json" data-aimlab-build="1">
 {
   "js/sentinel.js": "f42c97598e1276f2581d758b8859d071db4e7a5f545d8fa9212683f878b0a8e7",
-  "js/chase.js": "005d4313d58f30704b65ee7cebcabb55ec5e58a02ec6871dec566ecea9a8dffb",
+  "js/chase.js": "7ddf5b7970390319b1ae041765d9dcb80ffd9de4d583813dae128538c28ee70e",
   "js/flappy.js": "9f3e7edc6efa1ef71965de76494e1e1e8d107fa6d53256cf2df0e5ab4991f959",
   "js/net.js": "85805328879c92fd1f412ba06e7d3df21248f3ee988d9bca9997f81e8d03fe42",
-  "js/main.js": "e3a9c2cd336e8f98b0d2659c594ca6fb60f67805fb5f0e6b4f11277fe3b52e6c"
+  "js/main.js": "d224498b2747ae50fb37feb5dd522ce0fbbf668d6ee9bb0ee7f1edb449528d5d"
 }
 </script>
 <style>
@@ -365,9 +365,6 @@
     box-shadow: inset 2px 2px 0 var(--w95-shadow), inset -2px -2px 0 var(--w95-hilite);
   }
 
-  /* the loud one keeps the same gray button, but its label carries the warning */
-  .mode.loud { color: #7a0000; }
-
   .mode:focus-visible { outline: 1px dotted #000; outline-offset: -6px; }
 
   .modenote {
@@ -379,16 +376,6 @@
   }
 
   .modenote.last { margin-bottom: 0; }
-
-  /* the loudness warning reads as a Win95 dialog note */
-  .modenote.warn {
-    padding: 7px 9px;
-    border: 2px solid;
-    border-color: var(--w95-shadow) var(--w95-light) var(--w95-light) var(--w95-shadow);
-    background: #d4d0c8;
-    color: #7a0000;
-    font-weight: 700;
-  }
 
   /* ---- V3: account strip and leaderboard, same Win95 language ---- */
 
@@ -2246,13 +2233,13 @@
         <p class="startpitch">A popup with survival instincts. Land the close button.</p>
 
         <button class="mode" id="btnPractice" type="button">Practice Mode</button>
-        <p class="modenote">Straight to the chase. Timed, silent, one window between you and a clean desktop.</p>
+        <p class="modenote">Straight to the chase. Timed. One window between you and a clean desktop.</p>
 
-        <button class="mode loud" id="btnSimulation" type="button">Simulation (LOUD!)</button>
-        <p class="modenote warn">Warning: this one plays loud audio. Turn your volume down first.</p>
+        <button class="mode" id="btnSimulation" type="button">Simulation</button>
+        <p class="modenote">Flap through the gauntlet first. Clear it and the chase begins, with a different face on the run.</p>
 
-        <button class="mode loud" id="btnImpossible" type="button">Impossible (LOUD!)</button>
-        <p class="modenote warn last">Warning: also loud. Turn your volume down first. The window has stopped negotiating and the desktop is full of folders.</p>
+        <button class="mode" id="btnImpossible" type="button">Impossible</button>
+        <p class="modenote last">Simulation with the mercy removed. The window has stopped negotiating and the desktop is full of folders.</p>
       </div>
 
       <div class="panel hide" id="panelBoard">

@@ -3,7 +3,6 @@
 A browser game that exists to make you angry at a popup ad. The start
 screen offers three modes. Pick one and go make yourself miserable.
 
-Simulation and Impossible both play loud audio. Turn your volume down first.
 A mouse is required to win: touch and pen can play, but only a real mouse
 click closes the window.
 
@@ -21,26 +20,22 @@ starts the moment the chase does, and misses, near-misses and your best
 time are tracked and saved locally. Practice has no visual verification --
 it is just you against the window.
 
-**Simulation (LOUD!)** - TURN YOUR VOLUME DOWN FIRST. This mode is
-genuinely loud. It opens with a from-scratch Flappy-style gauntlet: flap
+**Simulation** - opens with a from-scratch Flappy-style gauntlet: flap
 through pipes until you reach 10 points in a single run (any death
 resets your score to zero). Clear that and the chase begins, now with a
-different face on the run and an 8-second audio loop playing at full
-volume for the rest of the round. A one-attempt, single-round visual
+different face on the run. A one-attempt, single-round visual
 verification runs between Flappy and Chase, and the popup then spawns at a
 fresh random position. A wrong match fails only that run; repeated rapid
 mismatches add a brief retry delay capped at one minute, not an account ban.
 
-**Impossible (LOUD!)** - Simulation with the mercy removed. The gauntlet
+**Impossible** - Simulation with the mercy removed. The gauntlet
 runs 20 percent faster, the window is meaningfully harder to pin down,
 and the desktop is scattered with folders. Clicking a folder counts as a
 miss and opens an empty Explorer window somewhere else on the desktop,
 which has to be closed before the popup will accept its fate. It has its
 own leaderboard.
 
-Every missed click in Simulation and Impossible triggers its own
-synthesized Windows-error chord, mixed under the loop. Practice Mode is
-silent.
+The game is silent in every mode.
 
 ## Fair play
 
@@ -89,8 +84,7 @@ python3 -m http.server
 ```
 
 Then open http://localhost:8000/. Opening `index.html` straight off disk
-works for Practice, but browsers refuse the audio fetch on `file://`, so
-Simulation runs silent. The game itself has no build step, no dependencies
+works too. The game itself has no build step, no dependencies
 and no CDN calls; a local copy simply shows the leaderboard as OFFLINE,
 since sign-in only works from the published site.
 
@@ -104,7 +98,6 @@ since sign-in only works from the published site.
 - `js/net.js` - leaderboard and sign-in client.
 - `assets/emoney.png` - the Practice Mode target.
 - `assets/simulation.png` - the Simulation and Impossible target.
-- `assets/loop.wav` - the Simulation and Impossible audio loop.
 - `server/` - the leaderboard API: Twitch sign-in, score validation and
   the activity feed. Node and Postgres, deployed separately. Its secrets
   live in the host's environment, never in this repo.

@@ -1,18 +1,15 @@
 /* eMoney Aim Labs -- mode router.
 
-   Owns the start screen, the modes, and the shared AudioContext for the loud
-   ones. Nothing here knows how either game works; it only wires them:
+   Owns the start screen and the modes. Nothing here knows how either game
+   works; it only wires them:
 
-     Practice    -> AimlabChase with emoney.png, no shared audio.
+     Practice    -> AimlabChase with emoney.png.
      Simulation  -> AimlabFlappy to 10 points, then AimlabChase with
-                    simulation.png and the 8 s loop.
+                    simulation.png.
      Impossible  -> Simulation's pipeline with the gauntlet at 1.2x, then the
                     chase at its cruelest (the engine keys off the mode label).
 
-   Autoplay policy: the loop.wav bytes are fetched immediately (a plain network
-   request needs no permission), but an AudioContext is only ever constructed
-   inside a user gesture -- the mode button click on the normal path, the first
-   trusted pointerdown on the QA-seam path.
+   The game is silent: no audio is fetched, decoded or played anywhere.
 */
 (function () {
   'use strict';
@@ -21,9 +18,7 @@
   var W = window;
   var LOG = (W.console && W.console.log) ? W.console.log.bind(W.console) : function () {};
   var ERR = (W.console && W.console.error) ? W.console.error.bind(W.console) : LOG;
-  var FETCH = W.fetch ? W.fetch.bind(W) : null;
 
-  var LOOP_URL     = './assets/loop.wav';
   var TARGET_SCORE = 10;
 
   var PRACTICE = {
@@ -59,90 +54,6 @@
 
   var chase = null, flappy = null;
   var running = null;           // re-entrancy guard: engines must never stack
-
-  /* ---------------- shared audio ---------------- */
-
-  var ctx = null, buffer = null, raw = null;
-  var fetching = false, decoding = false, gestureArmed = false;
-
-  function fetchLoop() {
-    if (fetching || raw || buffer || !FETCH) return;
-    fetching = true;
-    FETCH(LOOP_URL).then(function (res) {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.arrayBuffer();
-    }).then(function (bytes) {
-      raw = bytes;
-      decodeLoop();
-    }, function (err) {
-      ERR('[AIMLAB] loop fetch failed: ' + err.message);
-    });
-  }
-
-  // Only ever called from inside a user gesture.
-  function ensureContext() {
-    if (ctx) return ctx;
-    var AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    try { ctx = new AC(); } catch (e) { return null; }
-    pushAudio();
-    decodeLoop();
-    return ctx;
-  }
-
-  function decodeLoop() {
-    if (!ctx || !raw || buffer || decoding) return;
-    decoding = true;
-    var bytes = raw;
-    raw = null;                     // decodeAudioData detaches the ArrayBuffer
-    // Both the callback form and the promise form are wired up, so this works
-    // whichever one the browser implements; onDecoded guards against running twice.
-    var p;
-    try {
-      p = ctx.decodeAudioData(bytes, onDecoded, onDecodeFailed);
-    } catch (e) {
-      onDecodeFailed();
-      return;
-    }
-    // Chrome honours both forms, so a bad buffer used to report twice
-    if (p && p.then) p.then(onDecoded, onDecodeFailed);
-  }
-
-  function onDecoded(decoded) {
-    if (buffer || !decoded) return;
-    decoding = false;
-    buffer = decoded;
-    pushAudio();
-  }
-
-  // Chrome honours both the callback and the promise form, so this used to
-  // report the same bad buffer twice.
-  var decodeReported = false;
-  function onDecodeFailed() {
-    decoding = false;
-    if (decodeReported) return;
-    decodeReported = true;
-    ERR('[AIMLAB] loop decode failed');
-  }
-
-  // Hands whatever exists so far to a running chase. The engine starts the loop
-  // when both halves are present and ignores the call otherwise, so a buffer
-  // that lands after the chase has begun still gets played.
-  function pushAudio() {
-    if (chase && chase.setAudio) chase.setAudio({ ctx: ctx, buffer: buffer });
-  }
-
-  // QA-seam path only: no button was clicked, so wait for the first real
-  // pointer press before touching an AudioContext.
-  function armGesture() {
-    if (gestureArmed) return;
-    gestureArmed = true;
-    window.addEventListener('pointerdown', function onFirst(e) {
-      if (!e.isTrusted) return;
-      window.removeEventListener('pointerdown', onFirst, true);
-      ensureContext();
-    }, true);
-  }
 
   /* ---------------- V3: account, leaderboard, run lifecycle ----------------
      Everything here is best-effort. net.js resolves to null rather than throwing
@@ -752,30 +663,23 @@
                                          cheated: st.cheated }); },
       onChallenge: reportChallenge,
       onBan: reportBan,
-      onExit: function (action) { onChaseExit(action, 'practice'); },
-      // V2.8: practice is silent. No loop, no error chord, no AudioContext -- the
-      // engine never builds one, so there is nothing here to autoplay-gate.
-      audio: null
+      onExit: function (action) { onChaseExit(action, 'practice'); }
     });
   }
 
-  function startSimulation(fromGesture) { startGauntlet('simulation', fromGesture); }
-  function startImpossible(fromGesture) { startGauntlet('impossible', fromGesture); }
+  function startSimulation() { startGauntlet('simulation'); }
+  function startImpossible() { startGauntlet('impossible'); }
 
   /* V4.0: Simulation and Impossible share one shape -- a witnessed run from
-     flappy start, the audio loop, the gauntlet, then the chase. The mode picks
-     the assets, the gauntlet speed and the engine's difficulty label. */
-  function startGauntlet(mode, fromGesture) {
+     flappy start, the gauntlet, then the chase. The mode picks the assets,
+     the gauntlet speed and the engine's difficulty label. */
+  function startGauntlet(mode) {
     if (running) return;
     running = mode;
     var cfg = (mode === 'impossible') ? IMPOSSIBLE : SIMULATION;
     startScreen.classList.add('hide');
     LOG('[AIMLAB] MODE mode=' + mode);
     beginRun(mode);                  // V3.3: witnessed from the gauntlet onward
-    fetchLoop();
-
-    if (fromGesture) ensureContext();   // the mode button click is the gesture
-    else armGesture();
 
     if (!skipFlappy && window.AimlabFlappy && window.AimlabFlappy.start) {
       flappy = window.AimlabFlappy.start(stage, {
@@ -835,10 +739,7 @@
       onExit: function (action) { onChaseExit(action, mode); },
       onBan: reportBan,
       susSeed: (info && info.sus > 0) ? info.sus : 0,
-      stateCheat: !!(info && info.stateCheat),
-      // A non-null object tells the engine this module owns the audio. Either
-      // field may still be null; pushAudio fills them in as they arrive.
-      audio: { ctx: ctx, buffer: buffer }
+      stateCheat: !!(info && info.stateCheat)
     });
   }
 
@@ -860,7 +761,7 @@
       if (mode === 'practice') startPractice();
       else {
         skipFlappy = false;           // a gauntlet-mode retry starts at the gauntlet
-        startGauntlet(mode, true);    // the button click is the audio gesture
+        startGauntlet(mode);
       }
       return;
     }
@@ -1509,12 +1410,8 @@
   if (isSeam) LOG('[AIMLAB] QA SEAM USED');
 
   document.getElementById('btnPractice').addEventListener('click', startPractice);
-  document.getElementById('btnSimulation').addEventListener('click', function () {
-    startSimulation(true);
-  });
-  document.getElementById('btnImpossible').addEventListener('click', function () {
-    startImpossible(true);
-  });
+  document.getElementById('btnSimulation').addEventListener('click', startSimulation);
+  document.getElementById('btnImpossible').addEventListener('click', startImpossible);
 
   /* V3.5. The activity log is on the landing tab, so it opens itself -- the
      player never has to ask for it. It is a separate connection from the account
@@ -1542,6 +1439,6 @@
   }
 
   if (mode === 'practice') startPractice();
-  else if (mode === 'simulation') startSimulation(false);
-  else if (mode === 'impossible') startImpossible(false);
+  else if (mode === 'simulation') startSimulation();
+  else if (mode === 'impossible') startImpossible();
 })();
